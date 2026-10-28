@@ -20,15 +20,15 @@ import javax.microedition.khronos.opengles.GL10;
  * 封面颜色做成缓慢流动的极光背景，场景最深处挂一张大的封面；封面是一块侧着的厚玻璃砖，立在水面上方；
  * 歌词贴在横放的圆柱上（像 iOS 的滚轮），横屏时整列绕自己中心的竖直轴转 30° 朝向封面；当前句整句亮起（宿主只给每句开头的时间）；
  * 水面是真的平面倒影（镜像一台相机），封面、歌词、光带、背景封面、控制条都按真实的高度和远近照进水里；
- * 控制条是一块浮在水面上的玻璃，播放 / 暂停图形会变形，播放键外圈是进度，"上一首"左边是收藏红心；上下翻歌词时中间出现定位线，点右边的播放键从那一句开始放
- * （收藏、跳到某句宿主都没有，直接连播放器做，见 Player）。
+ * 控制条是一块浮在水面上的玻璃，播放 / 暂停图形会变形，播放键外圈是进度；上下翻歌词时中间出现定位线，点右边的播放键从那一句开始放
+ * （跳到某句宿主没有，发给「多媒体」的导出入口做，见 Player）。
  * 开场、换歌：光点从封面流出聚成歌词。所有动作都是弹簧算的。
  * 单位同网页版：场景里 1 = 1 个 CSS 像素（设备像素 ÷ 屏幕密度），画布按密度 1.5 画（同网页版的像素比上限）。
  * 只在 GL 线程里跑：主线程把媒体快照、深浅色、设置交进来（字体等到下一帧在 GL 线程里换），手势用 queueEvent。停着不动不出帧，帧率按设置（自动时 60 帧画不过来降到 30 帧）。
  */
 final class Scene implements GLSurfaceView.Renderer {
     interface Host {
-        void press(String cmd);   // previous / toggle / next / heart
+        void press(String cmd);   // previous / toggle / next
         void seek(long ms);       // 点了歌词定位线上的播放键：从那一句开始放
         void btnWait(boolean w);  // 开场动画还没走完：右上角的键先藏着
     }
@@ -312,11 +312,8 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  o = vec4(col, 1.0);\n"
         + "}";
 
-    // uBx：上一首、下一首离中间多远；uHx：红心在哪（见 pillPlace）；uHeart：x 显示、y 实心（收藏了）、z 没开权限（淡）、w 按下去的缩放
-    private static final String F_ICONS = "uniform float uW, uH, uPlay, uProg, uK, uDay, uBx, uHx; uniform vec3 uPress, uInk, uAcc; uniform vec4 uHeart; uniform sampler2D uTime; in vec2 vUv; out vec4 o;\n"
+    private static final String F_ICONS = "uniform float uW, uH, uPlay, uProg, uK, uDay; uniform vec3 uPress, uInk, uAcc; uniform sampler2D uTime; in vec2 vUv; out vec4 o;\n"
         + "float sdRB(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }\n"
-        + "float sdHeart(vec2 p) { p.x = abs(p.x); if (p.y + p.x > 1.0) return length(p - vec2(0.25, 0.75)) - 0.35355339;\n"
-        + "  vec2 a = p - vec2(0.0, 1.0), b = p - 0.5 * max(p.x + p.y, 0.0); return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y); }\n"
         + "float sdTri(vec2 p, float r) { const float k = 1.7320508; p.x = abs(p.x) - r; p.y = p.y + r / k;\n"
         + "  if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0; p.x -= clamp(p.x, -2.0 * r, 0.0); return -length(p) * sign(p.y); }\n"
         + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n"
@@ -326,7 +323,7 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  float dPlay = sdTri(vec2(c.y, c.x - r * 0.16), r) - r * 0.12;\n"
         + "  float dPause = min(sdRB(c - vec2(-r * 0.42, 0.0), vec2(r * 0.2, r * 0.82), r * 0.08), sdRB(c - vec2(r * 0.42, 0.0), vec2(r * 0.2, r * 0.82), r * 0.08));\n"
         + "  float d = mix(dPlay, dPause, uPlay);\n"
-        + "  float bx = uBx, rs = h * 0.115;\n"
+        + "  float bx = uW * 0.19, rs = h * 0.115;\n"
         + "  vec2 a = (p - vec2(-bx, 0.0)) / uPress.x, b = (p - vec2(bx, 0.0)) / uPress.z;\n"
         + "  float dPrev = min(sdTri(vec2(a.y, -(a.x + rs * 0.55)), rs), sdTri(vec2(a.y, -(a.x - rs * 0.75)), rs)) - rs * 0.1;\n"
         + "  float dNext = min(sdTri(vec2(b.y, b.x + rs * 0.75), rs), sdTri(vec2(b.y, b.x - rs * 0.55), rs)) - rs * 0.1;\n"
@@ -336,11 +333,9 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  float on = fill(ring) * step(ang, uProg), base = fill(ring) * 0.22;\n"
         + "  vec4 tm = texture(uTime, vec2(vUv.x, 1.0 - vUv.y));\n"
         + "  vec3 accC = mix(uAcc, uAcc * 0.62, uDay);\n"
-        + "  float hs = h * 0.22 * uHeart.w, dH = sdHeart((p - vec2(uHx, -hs * 0.55)) / hs) * hs, hk = uHeart.x * mix(1.0, 0.38, uHeart.z);\n"
-        + "  float hf = fill(dH) * uHeart.y * hk, hl = fill(abs(dH) - h * 0.016) * (1.0 - uHeart.y) * hk * 0.95;\n"
         + "  float aInk = inkA * 0.95, aTm = tm.a * 0.62;\n"
-        + "  vec3 col = uInk * (aInk + base + aTm + hl) + accC * (on + hf) * 1.1;\n"
-        + "  float al = clamp(aInk + base + aTm + on + hl + hf, 0.0, 1.0);\n"
+        + "  vec3 col = uInk * (aInk + base + aTm) + accC * on * 1.1;\n"
+        + "  float al = clamp(aInk + base + aTm + on, 0.0, 1.0);\n"
         + "  o = vec4(col * uK, al * uK);\n"
         + "}";
 
@@ -973,11 +968,9 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     // ================= 控制条：一块浮在水面上的玻璃 =================
-    private final Spring[] press = { new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18) }; // 上一首、播放、下一首、红心
+    private final Spring[] press = { new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18) };
     private final Spring play = new Spring(1, 160, 18, 0.002f), rise = new Spring(1, 90, 11, 0.0005f);
-    private final Spring heartVis = new Spring(0, 160, 20, 0.002f), heartFill = new Spring(0, 220, 16, 0.002f), heartDim = new Spring(0, 160, 20, 0.002f);
     private float pillBaseY, pillLw = 1, pillLh = 1, pillF = 1, pillZ, pillBv, iconsZ, pillK;
-    private float pillBx, pillHx, pillFontK = 1; // 上一首、下一首离中间多远，红心在哪，时间字缩到几成（见 pillPlace）
     private String pillKey = "", timeText = "";
     private final float[] pillM = new float[16], iconsM = new float[16];
     private int timeTex;
@@ -1007,18 +1000,9 @@ final class Scene implements GLSurfaceView.Renderer {
         }
         pillLw = lw;
         pillLh = lh;
-        // 红心放在左边时间和"上一首"中间。窗口"瘦"（7 分屏、竖屏小窗口）时控制条按宽度算、字和按钮按高度算，会挤：
-        // 时间字按窄的程度缩小（最小八成），还放不下就把上一首、下一首往中间收（不碰播放键外圈的进度）
-        float q = lw / lh, g = lh * 0.14f, hw = lh * 0.13f, pw = lh * 0.16f;
-        pillFontK = clamp(q / 5.6f, 0.8f, 1);
-        float tEnd = -lw / 2 + lw * 0.075f + Txt.timeWidth(lh * 0.24f * pillFontK); // 左边时间的右头
-        float hMin = tEnd + g + hw;
-        pillBx = Math.min(lw * 0.19f, Math.max(lh * 0.58f, -(hMin + hw + g + pw)));
-        pillHx = Math.min((hMin - pillBx - pw - g - hw) / 2, -pillBx - pw - g - hw);
-        pillHx = Math.max(pillHx, hMin);
     }
 
-    /** 手指点在哪个键上：0 上一首 / 1 播放暂停 / 2 下一首 / 3 红心 / -1 没点到控制条（cx、cy 是画面上的位置） */
+    /** 手指点在哪个键上：0 上一首 / 1 播放暂停 / 2 下一首 / -1 没点到控制条（cx、cy 是画面上的位置） */
     private int pillHit(float cxp, float cyp) {
         float[] PS = new float[16], out = new float[3];
         G.mul(PS, P, S);
@@ -1026,8 +1010,8 @@ final class Scene implements GLSurfaceView.Renderer {
         G.mul(PM, PS, pillM);
         int best = -1;
         float bd = 1e9f;
-        float[] xs = { -pillBx, 0, pillBx, pillHx };
-        for (int k = 0; k < (MS.heart != Player.HIDE ? 4 : 3); k++) {
+        float[] xs = { -pillLw * 0.19f, 0, pillLw * 0.19f };
+        for (int k = 0; k < 3; k++) {
             G.project(out, PM, xs[k], 0, iconsZ);
             float dx = (out[0] * 0.5f + 0.5f) * W - cxp, dy = (0.5f - out[1] * 0.5f) * H - cyp, dd = dx * dx + dy * dy;
             if (dd < bd) { bd = dd; best = k; }
@@ -1044,12 +1028,6 @@ final class Scene implements GLSurfaceView.Renderer {
         for (Spring s : press) if (s.step(dt)) moving = true;
         play.t = MS.playing ? 1 : 0;
         if (play.step(dt)) moving = true;
-        int hs = MS.heart;
-        heartVis.t = hs != Player.HIDE ? 1 : 0;
-        if (hs != Player.HIDE) { heartFill.t = hs == Player.ON ? 1 : 0; heartDim.t = hs == Player.NO_PERM ? 1 : 0; } // 藏起来的时候保持原样淡出
-        if (heartVis.step(dt)) moving = true;
-        if (heartFill.step(dt)) moving = true;
-        if (heartDim.step(dt)) moving = true;
         rise.t = k0 > 0.02f ? 1 : 0;
         if (rise.step(dt)) moving = true;
         float y = pillBaseY - (1 - rise.x) * pillLh * 1.9f;
@@ -1061,7 +1039,7 @@ final class Scene implements GLSurfaceView.Renderer {
         if (!txt.equals(timeText) && timeBmp != null) {
             timeText = txt;
             float pxw = pillLw / 512;
-            Txt.time(timeBmp, fmt(ms), dTxt, pillLh * 0.24f * pillFontK / pxw);
+            Txt.time(timeBmp, fmt(ms), dTxt, pillLh * 0.24f / pxw);
             if (timeTex == 0) timeTex = G.texture(timeBmp, false); else G.update(timeTex, timeBmp);
         }
         return moving;
@@ -1220,7 +1198,7 @@ final class Scene implements GLSurfaceView.Renderer {
         if (g.mode.isEmpty() && !cancel && tms - g.t < 500) {
             // 点封面或播放键才暂停 / 播放，别处点一下不管（免得误触）
             if (g.seek) seekTap();
-            else if (g.key == 0) host.press("previous"); else if (g.key == 2) host.press("next"); else if (g.key == 3) host.press("heart");
+            else if (g.key == 0) host.press("previous"); else if (g.key == 2) host.press("next");
             else if (g.key == 1 || g.cover) { cvPress.v -= 1.5f; host.press("toggle"); }
         } else if ("v".equals(g.mode) && g.cover) cvRx.t = 0;
         else if ("v".equals(g.mode)) { LY.scrollV = -g.vy * 1000; LY.idleAt = clock; }
@@ -1549,7 +1527,7 @@ final class Scene implements GLSurfaceView.Renderer {
             mv(V, iconsM);
             pIcons.m4("uP", Pp); pIcons.m4("uMV", MV);
             pIcons.f("uW", pillLw); pIcons.f("uH", pillLh); pIcons.f("uPlay", play.x); pIcons.f("uProg", dur > 0 ? clamp(MS.pos() / (float) dur, 0, 1) : 0);
-            pIcons.f3("uPress", press[0].x, press[1].x, press[2].x); pIcons.f4("uHeart", heartVis.x, heartFill.x, heartDim.x, press[3].x); pIcons.f("uBx", pillBx); pIcons.f("uHx", pillHx); pIcons.c3("uInk", ink); pIcons.c3("uAcc", pal.accent); pIcons.tex("uTime", 0, timeTex);
+            pIcons.f3("uPress", press[0].x, press[1].x, press[2].x); pIcons.c3("uInk", ink); pIcons.c3("uAcc", pal.accent); pIcons.tex("uTime", 0, timeTex);
             pIcons.f("uK", pillK); pIcons.f("uDay", day);
             mUnit.draw();
         }

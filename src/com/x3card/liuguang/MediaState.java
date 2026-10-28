@@ -36,7 +36,7 @@ import java.util.List;
  * - 封面按"地址 + 曲目"认：换歌时宿主常常还是上一首的地址、或者封面文件还没换好，所以地址和上一首一样时 2 秒后再取一次，内容变了才换。
  *   换歌的空档宿主先推空封面，不收；取不到用按歌名生成的封面。
  * - 播放控制：按下去先按按下去的显示（最多 4 秒），宿主推来真实状态再对齐，失败变回去。
- * - 收藏红心、跳到某一句宿主没有，直接连播放器做（Player）：红心由 MainActivity 填进 heart；跳过去先按跳到的位置显示（seekLocal）。
+ * - 跳到某一句宿主没有，发给「多媒体」的导出入口做（Player，零权限）；跳过去先按跳到的位置显示（seekLocal）。
  * 全在主线程里用；读封面在调用方给的线程里。
  */
 final class MediaState {
@@ -54,7 +54,6 @@ final class MediaState {
     int revTrack, revLines, revCover, revCur;
     String lastCmd = "", trackCmd = ""; // trackCmd：换歌前最后按的是什么（封面往哪边翻）
     String pkg; // 宿主说的播放器包名
-    int heart = Player.HIDE; // 红心（Player.heart）
 
     private final Uiplus host;
     private final Handler main = new Handler(Looper.getMainLooper()), io;
@@ -478,7 +477,7 @@ final class MediaState {
         String track, title = "", artist = "", trackCmd = "";
         String[] lines = new String[0];
         long[] times;
-        int cur = -1, revTrack, revLines, revCover, revCur, heart = Player.HIDE;
+        int cur = -1, revTrack, revLines, revCover, revCur;
         long dur, posBase, posAt;
         Bitmap cover;
         String coverTrack;
@@ -498,7 +497,6 @@ final class MediaState {
         s.revTrack = revTrack; s.revLines = revLines; s.revCover = revCover; s.revCur = revCur;
         s.dur = dur; s.posBase = pos(); s.posAt = now();
         s.cover = cover; s.coverTrack = coverTrack;
-        s.heart = heart;
         return s;
     }
 

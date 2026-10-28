@@ -20,7 +20,6 @@ import android.widget.TextView;
 /**
  * 叠在 3D 场景上面的按键和面板（照网页版的 index.html / style.css）：右上角齿轮、全屏键在它左边（竖屏在它下面），开场动画快完了才淡入、开着面板时藏起来；
  * 设置面板从右边滑出（竖屏整张盖住），每项一排分段按钮；底部中间的提示条几秒后淡出。尺寸按窗口高度算（1rem = 高度 / 10.52，同网页版）。
- * 收藏和歌词定位要"通知使用权"（见 Player）：设置面板最上面一项说开没开、怎么开；没开时点红心、点定位线上的播放键弹一张卡片说同样的话（card）。
  * 深浅色跟着场景。没有按键、面板可点的地方不接手势（交给下面的场景）
  */
 @SuppressLint("ViewConstructor")
@@ -28,7 +27,6 @@ final class Ui extends FrameLayout {
     interface Actions {
         void set(String key, Object value);
         void fullscreen();
-        void grant(); // 用 root 开通知使用权
     }
 
     private static final Object[][] ON = { { true, "开" }, { false, "关" } };
@@ -53,11 +51,8 @@ final class Ui extends FrameLayout {
     private final LinearLayout panel, body;
     private final ScrollView scroll;
     private final TextView title, toast;
-    private final FrameLayout cardLayer;
-    private final LinearLayout cardBox;
     private final PathInterpolator ease = new PathInterpolator(0.22f, 1f, 0.36f, 1f);
-    private boolean day, narrow, open, wait = true, blocked, cardOn;
-    private boolean pGranted, pRoot, pBusy; // 通知使用权：开了没有、车上有没有 root、正在用 root 开
+    private boolean day, narrow, open, wait = true, blocked;
     private String fsMode = "";
     private float rem = 10;
     private int w = 1, h = 1;
@@ -102,16 +97,6 @@ final class Ui extends FrameLayout {
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         addView(panel);
 
-        cardLayer = new FrameLayout(c);
-        cardLayer.setClickable(true);
-        cardLayer.setOnClickListener(v -> card(false)); // 点卡片外面关掉
-        cardLayer.setVisibility(GONE);
-        cardBox = new LinearLayout(c);
-        cardBox.setOrientation(LinearLayout.VERTICAL);
-        cardBox.setClickable(true);
-        cardLayer.addView(cardBox);
-        addView(cardLayer);
-
         toast = new TextView(c);
         toast.setGravity(Gravity.CENTER);
         toast.setAlpha(0);
@@ -149,38 +134,8 @@ final class Ui extends FrameLayout {
     }
     /** 设置在别处改了（全屏页和小窗口共用一份）：面板开着就重画 */
     void refresh() { if (open) rows(); }
-    boolean isOpen() { return open || cardOn; }
-    void closeAll() { card(false); panel(false); }
-
-    /** 通知使用权的状态变了：面板、卡片开着就重画；开好了卡片自己关掉 */
-    void setPlayer(boolean granted, boolean root, boolean busy) {
-        if (granted == pGranted && root == pRoot && busy == pBusy) return;
-        pGranted = granted; pRoot = root; pBusy = busy;
-        if (open) rows();
-        if (cardOn) { if (granted) card(false); else fillCard(); }
-    }
-
-    /** 没开权限时点红心、点定位线上的播放键：弹一张卡片说怎么开 */
-    void card(boolean on) {
-        if (on == cardOn) return;
-        cardOn = on;
-        cardLayer.animate().cancel();
-        if (on) {
-            fillCard();
-            cardLayer.setVisibility(VISIBLE);
-            cardLayer.setAlpha(0);
-            cardBox.setScaleX(0.94f); cardBox.setScaleY(0.94f);
-            cardLayer.animate().alpha(1).setDuration(300).start();
-            cardBox.animate().scaleX(1).scaleY(1).setDuration(400).setInterpolator(ease).start();
-        } else {
-            cardLayer.animate().alpha(0).setDuration(250).withEndAction(() -> { if (!cardOn) cardLayer.setVisibility(GONE); }).start();
-        }
-    }
-
-    private void fillCard() {
-        cardBox.removeAllViews();
-        perm(cardBox, true);
-    }
+    boolean isOpen() { return open; }
+    void closeAll() { panel(false); }
 
     private Runnable toastOff;
 
@@ -261,9 +216,6 @@ final class Ui extends FrameLayout {
         toast.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(0.24f));
         toast.setLineSpacing(0, 1.2f);
         toast.setPadding(px(0.26f), px(0.12f), px(0.26f), px(0.12f));
-        cardBox.setLayoutParams(new LayoutParams(narrow ? Math.round(w * 0.9f) : Math.min(px(6.4f), Math.round(w * 0.9f)), -2, Gravity.CENTER));
-        cardBox.setPadding(px(0.32f), px(0.28f), px(0.32f), px(0.28f));
-        if (cardOn) fillCard();
         colors();
     }
 
@@ -286,9 +238,6 @@ final class Ui extends FrameLayout {
         GradientDrawable tb = round(day ? 0xe0ffffff : 0x9e000000, px(0.3f));
         toast.setBackground(tb);
         toast.setTextColor(day ? 0xff151922 : 0xffffffff);
-        cardLayer.setBackgroundColor(day ? 0x33000000 : 0x66000000);
-        cardBox.setBackground(round(sheet, px(0.24f)));
-        if (cardOn) fillCard();
         if (open) rows();
     }
 
@@ -304,71 +253,11 @@ final class Ui extends FrameLayout {
         return d;
     }
 
-    // ================= 收藏和歌词定位：开没开、怎么开（面板最上面一项和卡片共用） =================
-    private TextView text(String s, int color, float size) {
-        TextView t = new TextView(getContext());
-        t.setText(s);
-        t.setTextColor(color);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(size));
-        t.setLineSpacing(0, 1.25f);
-        return t;
-    }
-
-    private TextView button(String s, boolean main, Runnable onClick) {
-        TextView b = text(s, main ? chipOnInk : ink, 0.24f);
-        b.setGravity(Gravity.CENTER);
-        b.setBackground(round(main ? chipOn : chip, px(0.14f)));
-        b.setPadding(px(0.2f), px(0.12f), px(0.2f), px(0.12f));
-        b.setSingleLine(true);
-        b.setOnClickListener(x -> onClick.run());
-        return b;
-    }
-
-    private void perm(LinearLayout to, boolean inCard) {
-        LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(-1, -2);
-        gap.topMargin = px(0.1f);
-        TextView name = text("收藏和歌词定位", ink, inCard ? 0.3f : 0.26f);
-        if (inCard) name.setTypeface(Typeface.DEFAULT_BOLD);
-        to.addView(name);
-        if (pGranted) {
-            to.addView(text("已开启：点控制条上的红心收藏；上下翻歌词时，点中间那条线右边的播放键，从那一句开始放。", sub, 0.2f), gap);
-        } else {
-            to.addView(text("要开一个权限才能用。安卓叫它\"通知使用权\"，琉光只拿它连播放器，不读你的通知。"
-                + "车上设置里开这个权限的页面被比亚迪屏蔽了，所以" + (pRoot ? "用 root 开（弹窗出来后点允许）：" : "要用 adb 命令执行一次（覆盖升级以后不用再开）："), sub, 0.2f), gap);
-            if (pRoot) {
-                LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
-                bp.topMargin = px(0.14f);
-                TextView b = button(pBusy ? "等 root 授权…（在弹窗里点允许）" : "一键开启", true, () -> { if (!pBusy) act.grant(); });
-                b.setAlpha(pBusy ? 0.6f : 1);
-                to.addView(b, bp);
-                to.addView(text("没有 root 的话，用 adb 命令执行一次（覆盖升级以后不用再开）：", sub, 0.2f), gap);
-            }
-            TextView cmd = text("adb shell " + Player.CMD, ink, 0.19f);
-            cmd.setTypeface(Typeface.MONOSPACE);
-            cmd.setTextIsSelectable(true);
-            cmd.setBackground(round(chip, px(0.1f)));
-            cmd.setPadding(px(0.14f), px(0.1f), px(0.14f), px(0.1f));
-            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
-            cp.topMargin = px(0.08f);
-            to.addView(cmd, cp);
-        }
-        if (inCard) {
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
-            bp.topMargin = px(0.2f);
-            to.addView(button("知道了", false, () -> card(false)), bp);
-        }
-    }
-
     // ================= 面板里的每一项 =================
     private void rows() {
         body.removeAllViews();
         Context c = getContext();
-        LinearLayout pr = new LinearLayout(c);
-        pr.setOrientation(LinearLayout.VERTICAL);
-        pr.setPadding(0, px(0.14f), 0, px(0.16f));
-        perm(pr, false);
-        body.addView(pr);
-        boolean first = false;
+        boolean first = true;
         for (Object[] r : ROWS) {
             final String k = (String) r[0];
             if ("fsBar".equals(k) && fsMode.isEmpty()) continue;

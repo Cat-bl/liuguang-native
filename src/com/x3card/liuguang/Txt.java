@@ -161,14 +161,6 @@ final class Txt {
         return o;
     }
 
-    /** 控制条上时间有多宽（按 "0:00" 量，排红心、按钮用；单位同 fontPx） */
-    static float timeWidth(float fontPx) {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
-        p.setTextSize(fontPx);
-        return p.measureText("0:00");
-    }
-
     /** 控制条两头的时间：画在和控制条一样长宽比的画布上 */
     static void time(Bitmap b, String left, String right, float fontPx) {
         b.eraseColor(0);

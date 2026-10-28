@@ -28,7 +28,7 @@ import java.util.Calendar;
 /**
  * 琉光原生版：3D 场景（Scene，照网页版 main.js）+ 右上角的键和设置面板（Ui）+ 上面一层说明（InfoView：连不上、没授权时）。
  * 宿主的数据：媒体（MediaState，照网页版 media.js）、日夜模式（深浅色跟随车机时用，没有就按钟点 6～19 点是白天）。
- * 宿主没有的收藏红心、跳到某一句（歌词定位线）直接连播放器做（Player，要通知使用权；显示着才连）。
+ * 宿主没有"跳到某一句"（歌词定位线），发给「多媒体」的导出入口做（Player，零权限）。
  * 主线程把媒体快照、深浅色、设置交给 GL 线程；场景里按的键交回主线程发给宿主。
  * 全屏：宿主给外部应用的接口里没有网页卡片那套窗口切换（windows.*），所以自己在主屏上开一个全屏页（FullActivity，单独的任务）；
  * 在全屏页里点"恢复小屏"就关掉它，回到多窗口里原来那个。全屏页开着时小窗口里的场景停画。设置两边共用一份，回到前台时重新读
@@ -42,8 +42,6 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     private InfoView info;
     private Ui ui;
     private MediaState song;
-    private Player player;
-    private boolean hasRoot, granting; // 车上有 root（能一键开通知使用权）、正在用 root 开
     private Settings st;
     private final HandlerThread io = new HandlerThread("cover");
     private Handler ioH;
@@ -73,11 +71,6 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         ioH = new Handler(io.getLooper());
         host = new Uiplus(this, this);
         song = new MediaState(host, ioH, this::changed);
-        player = new Player(this, main, new Player.Listener() {
-            @Override public void changed() { pushSnap(); }
-            @Override public void heartFailed() { ui.toast("没收藏上，过一会儿再试"); }
-        });
-        hasRoot = Player.hasSu();
         root = new FrameLayout(this);
         view = newScene();
         info = new InfoView(this, this::infoPress);
@@ -106,7 +99,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         started = true;
         reload();
         ui.setFsMode(isFull() ? "small" : onMainScreen() ? "" : "full");
-        if (!slept) { view.onResume(); player.start(); pushSnap(); }
+        if (!slept) view.onResume();
         host.start();
         weatherWatch("auto".equals(st.rain));
         if (isFull()) { MainActivity p = pip.get(); if (p != null && p != this) p.sleep(true); }
@@ -117,7 +110,6 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         started = false;
         weatherWatch(false);
         host.background(); // 不马上断开：宿主的授权确认页会把这里盖住，授权申请挂在这个会话上
-        player.stop();
         view.onPause();
         if (isFull()) { MainActivity p = pip.get(); if (p != null && p != this) p.sleep(false); }
         super.onStop();
@@ -126,7 +118,6 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     @Override
     protected void onDestroy() {
         main.removeCallbacksAndMessages(null);
-        player.stop();
         host.quit();
         io.quitSafely();
         super.onDestroy();
@@ -141,8 +132,8 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     void sleep(boolean s) {
         if (s == slept) return;
         slept = s;
-        if (s) { view.onPause(); player.stop(); }
-        else if (started) { reload(); view.onResume(); player.start(); pushSnap(); }
+        if (s) view.onPause();
+        else if (started) { reload(); view.onResume(); }
     }
 
     /** 当前在主屏上（不在宿主多窗口的虚拟屏里） */
@@ -166,54 +157,17 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         rainApply();
     }
 
-    /** 交给场景一份快照（带上直接连播放器的红心） */
     private void pushSnap() {
-        player.setPkg(song.pkg);
-        song.heart = song.on ? player.heart(song.title) : Player.HIDE;
         view.scene.setSnap(song.snap());
-        ui.setPlayer(player.granted, hasRoot, granting);
     }
 
-    // ================= 收藏、跳到某一句（见 Player） =================
-    /** 有通知使用权就是真；没有弹卡片说怎么开（可能刚用电脑开过：先再看一眼） */
-    private boolean playerReady() {
-        if (!player.granted) { player.start(); pushSnap(); }
-        if (player.granted) return true;
-        ui.card(true);
-        return false;
-    }
-
-    private void heart() {
-        if (!playerReady()) return;
-        if (!player.toggleHeart(song.title)) ui.toast("这首歌现在收藏不了");
-    }
-
+    // ================= 歌词定位：跳到某一句（见 Player 开头说明） =================
     @Override
     public void seek(final long ms) {
         main.post(() -> {
-            if (!playerReady()) return;
-            if (!player.connected()) { ui.toast("连不上这个播放器，跳不过去"); return; }
-            player.seek(ms);
-            song.seekLocal(ms);
+            if (Player.seek(this, ms)) song.seekLocal(ms); // 发给「多媒体」的导出入口，零权限
+            else ui.toast("这台车跳不了歌词");
         });
-    }
-
-    /** 用 root 开通知使用权（Magisk 这类会弹窗问车主，在另一个线程里等） */
-    @Override
-    public void grant() {
-        if (granting) return;
-        granting = true;
-        pushSnap();
-        new Thread(() -> {
-            final String err = Player.grantByRoot();
-            main.post(() -> {
-                granting = false;
-                if (started && !slept) player.start(); else player.check();
-                if (player.granted) ui.toast("收藏和歌词定位开好了");
-                else ui.toast(err != null ? "没开成：" + err : "没开成，可以用设置里那条 adb 命令开");
-                pushSnap();
-            });
-        }, "grant").start();
     }
 
     // ================= 设置 =================
@@ -471,7 +425,6 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     @Override
     public void press(final String cmd) {
         main.post(() -> {
-            if ("heart".equals(cmd)) { heart(); return; } // 收藏不经过宿主
             if (!host.canExec()) { ui.toast("要先在宿主里允许「执行操作」"); authorize(); return; }
             song.press(cmd, (r, code, msg) -> {
                 if (code == null) return;
