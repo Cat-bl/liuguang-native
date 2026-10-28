@@ -24,6 +24,8 @@ import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * 琉光原生版：3D 场景（Scene，照网页版 main.js）+ 右上角的键和设置面板（Ui）+ 上面一层说明（InfoView：连不上、没授权时）。
@@ -103,7 +105,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         v.scene.setOpts(st);
         v.scene.setDay(wantDay());
         v.scene.setCovers(covers);
-        if (bydMedia != null) v.scene.setSongs(bydMedia.songs(), bydMedia.current());
+        if (bydMedia != null) v.scene.setSongs(queue(), bydMedia.current());
         return v;
     }
 
@@ -173,6 +175,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     /** 媒体数据变了：做一份快照交给场景（第一条到了就开场） */
     private void changed() {
         pushSnap();
+        if (otherPlayer() != otherPlayer) pushSongs();
         if (!booted && song.on) boot();
         rainApply();
     }
@@ -185,7 +188,17 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
 
     // ================= 歌单（场景里的 Shelf）：点了第几首（见 BydMedia、Player） =================
     private void pushSongs() {
-        view.scene.setSongs(bydMedia.songs(), bydMedia.current());
+        view.scene.setSongs(queue(), bydMedia.current());
+    }
+
+    /** 宿主说正在用的不是「多媒体」（单独装的音乐 App、蓝牙音乐……）：歌单、正在放哪首都是「多媒体」的，对不上，当没有歌单 */
+    private boolean otherPlayer;
+
+    private boolean otherPlayer() { return song.pkg != null && !song.pkg.isEmpty() && !Player.PKG.equals(song.pkg); }
+
+    private List<BydMedia.Song> queue() {
+        otherPlayer = otherPlayer();
+        return otherPlayer ? Collections.<BydMedia.Song>emptyList() : bydMedia.songs();
     }
 
     @Override

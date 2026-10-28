@@ -17,7 +17,7 @@ import android.util.Log;
  * 实车验证过：发 seek 到 90 秒，进度跟着跳；别的音源 / 不是「多媒体」时这条 intent 没人接，不报错也不生效。
  */
 final class Player {
-    private static final String PKG = "com.byd.mediacenter";
+    static final String PKG = "com.byd.mediacenter";
     private static final String CLS = "com.byd.mediacenter.main.MediaService";
 
     /** 跳到 ms 毫秒。发出去返回真（不等回执，这个入口不回结果） */

@@ -178,7 +178,7 @@ final class Shelf {
     // ================= 开 / 关 =================
     private void setWant(boolean w) {
         if (w == want) return;
-        if (w && n == 0) return;
+        if (w && (n == 0 || in.songs.isEmpty())) return; // 没有歌单，或者歌单刚没了、正在收起来
         want = w;
         if (w) {
             if (p == 0) { // 从歌词开始：正在放的那首当 hero（场景的封面砖变成它）
@@ -251,17 +251,8 @@ final class Shelf {
     // ================= 每帧 =================
     /** 先走：开关、歌单、进度 p（场景其它东西要用 p） */
     boolean tickP(float dt) {
+        takeSongs();
         In s = in;
-        if (s.songs != songs) { // 车机每次换歌都会再推一遍歌单（新的列表）：长度没变就不碰滚动（不然甩到一半停住）
-            boolean same = s.songs.size() == songs.size();
-            songs = s.songs; n = songs.size();
-            sc.songsAvail(n > 0);
-            if (n == 0) setWant(false);
-            if (!same && view != null) { view = null; kOf = new int[0]; }
-            vn = view == null ? n : view.length;
-            if (posS.x > vn - 1 || posS.t > vn - 1) { tw = false; posS.set(Math.max(0, vn - 1)); }
-            if (pad.isOpen()) ensureIndex();
-        }
         if (s.cur != playing) playing = s.cur;
         int r = req;
         if (r != 0) {
@@ -277,8 +268,23 @@ final class Shelf {
         p += pv * dt;
         if (p >= 1) { p = 1; if (pv > 0) pv = 0; }
         if (p <= 0) { p = 0; if (pv < 0) pv = 0; }
-        if (p == target && Math.abs(pv) < 0.02f) { pv = 0; if (p == 0) release(); }
+        if (p == target && Math.abs(pv) < 0.02f) { pv = 0; if (p == 0) { release(); takeSongs(); } }
         return true;
+    }
+
+    /** 收下新的歌单。歌单开着时没了（控制器断开、换了别的播放器）：先照常收起来（砖还在，飞回封面的位置），收完再换成空的 */
+    private void takeSongs() {
+        In s = in;
+        if (s.songs == songs) return;
+        if (s.songs.isEmpty() && engaged()) { g = null; setWant(false); return; }
+        boolean same = s.songs.size() == songs.size(); // 车机每次换歌都会再推一遍歌单（新的列表）：长度没变就不碰滚动（不然甩到一半停住）
+        songs = s.songs; n = songs.size();
+        sc.songsAvail(n > 0);
+        if (n == 0) setWant(false);
+        if (!same && view != null) { view = null; kOf = new int[0]; }
+        vn = view == null ? n : view.length;
+        if (posS.x > vn - 1 || posS.t > vn - 1) { tw = false; posS.set(Math.max(0, vn - 1)); }
+        if (pad.isOpen()) ensureIndex();
     }
 
     private final float[] tmpA = new float[7], tmpB = new float[7], tmpC = new float[7];
