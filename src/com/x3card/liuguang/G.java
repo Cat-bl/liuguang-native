@@ -55,7 +55,7 @@ final class G {
     /** 一个着色器程序和它的 uniform（位置按名字取，取过就记住；值和上次交给它的一样就不再交） */
     static final class Prog {
         final int id;
-        private static final class U { final int loc; int n; float a, b, c; float[] m; int i = Integer.MIN_VALUE; U(int l) { loc = l; } }
+        private static final class U { final int loc; int n; float a, b, c, d; float[] m; int i = Integer.MIN_VALUE; U(int l) { loc = l; } }
         private final java.util.HashMap<String, U> us = new java.util.HashMap<>();
         Prog(String vs, String fs) { id = program(vs, fs); }
         private U uu(String n) { U x = us.get(n); if (x == null) { x = new U(GLES30.glGetUniformLocation(id, n)); us.put(n, x); } return x; }
@@ -64,6 +64,7 @@ final class G {
         void f(String n, float v) { U x = uu(n); if (x.n == 1 && x.a == v) return; x.n = 1; x.a = v; GLES30.glUniform1f(x.loc, v); }
         void f2(String n, float a, float b) { U x = uu(n); if (x.n == 2 && x.a == a && x.b == b) return; x.n = 2; x.a = a; x.b = b; GLES30.glUniform2f(x.loc, a, b); }
         void f3(String n, float a, float b, float c) { U x = uu(n); if (x.n == 3 && x.a == a && x.b == b && x.c == c) return; x.n = 3; x.a = a; x.b = b; x.c = c; GLES30.glUniform3f(x.loc, a, b, c); }
+        void f4(String n, float a, float b, float c, float d) { U x = uu(n); if (x.n == 4 && x.a == a && x.b == b && x.c == c && x.d == d) return; x.n = 4; x.a = a; x.b = b; x.c = c; x.d = d; GLES30.glUniform4f(x.loc, a, b, c, d); }
         void c3(String n, float[] c) { f3(n, c[0], c[1], c[2]); }
         void m4(String n, float[] m) {
             U x = uu(n);

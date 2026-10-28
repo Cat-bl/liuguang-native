@@ -36,6 +36,7 @@ import java.util.List;
  * - 封面按"地址 + 曲目"认：换歌时宿主常常还是上一首的地址、或者封面文件还没换好，所以地址和上一首一样时 2 秒后再取一次，内容变了才换。
  *   换歌的空档宿主先推空封面，不收；取不到用按歌名生成的封面。
  * - 播放控制：按下去先按按下去的显示（最多 4 秒），宿主推来真实状态再对齐，失败变回去。
+ * - 收藏红心、跳到某一句宿主没有，直接连播放器做（Player）：红心由 MainActivity 填进 heart；跳过去先按跳到的位置显示（seekLocal）。
  * 全在主线程里用；读封面在调用方给的线程里。
  */
 final class MediaState {
@@ -45,12 +46,15 @@ final class MediaState {
     boolean on, playing, full;
     String track, title = "", artist = "";
     String[] lines = new String[0];
+    long[] times; // 每句开始的时间，和 lines 对齐（宿主给了整首歌词才有；歌词定位线用）
     int cur = -1;
     long dur;
     Bitmap cover;
     String coverTrack;
     int revTrack, revLines, revCover, revCur;
     String lastCmd = "", trackCmd = ""; // trackCmd：换歌前最后按的是什么（封面往哪边翻）
+    String pkg; // 宿主说的播放器包名
+    int heart = Player.HIDE; // 红心（Player.heart）
 
     private final Uiplus host;
     private final Handler main = new Handler(Looper.getMainLooper()), io;
@@ -65,6 +69,7 @@ final class MediaState {
     private final Runnable pressedTimer = () -> { pressed = null; playing = effPlaying(); emit(); };
     private long userPauseAt;
     private int gen;
+    private long seekedAt = -1; // 刚在这里跳到某一句（seekLocal）的时候：之后几秒宿主推来的歌词、进度可能还是跳之前的
 
     private static final class Line { final String t; final long at; Line(String t, long at) { this.t = t; this.at = at; } }
 
@@ -107,11 +112,13 @@ final class MediaState {
     private void newTrack(String id, String stale, boolean live) {
         if (lyrRetry != null) main.removeCallbacks(lyrRetry);
         stopRepeat();
+        seekedAt = -1;
         lyr = new Lyr();
         lyr.track = id;
         lyr.stale = stale == null ? "" : stale;
         lyr.start = live ? now() : -1;
         lines = new String[0];
+        times = null;
         full = false;
         cur = -1;
         revLines++;
@@ -142,9 +149,22 @@ final class MediaState {
         return false;
     }
 
-    /** 当前这句在整首里是第几句：从上一句往后找（副歌重复的按顺序对上），找不到再从头找（拖了进度、单曲循环） */
+    private boolean justSeeked() { return seekedAt >= 0 && now() - seekedAt < 4000; }
+
+    /** 当前这句在整首里是第几句：从上一句往后找（副歌重复的按顺序对上），找不到再从头找（拖了进度、单曲循环）。
+     *  刚跳过（4 秒内）：正在唱的那句是在现在的位置之前开始的，只认这样的（往前 12 秒、往后差 1.5 秒以内，取最晚的那处）；
+     *  对不上的是跳之前那句（宿主先推一次旧的），不认——不然同样的句子唱了几遍时会认到后面那遍 */
     private int locate(String t) {
         List<Line> L = lyr.lines;
+        if (justSeeked()) {
+            long p = pos();
+            int best = -1;
+            for (int k = 0; k < L.size(); k++) {
+                long at = L.get(k).at;
+                if (L.get(k).t.equals(t) && at <= p + 1500 && at >= p - 12000 && (best < 0 || at > L.get(best).at)) best = k;
+            }
+            return best;
+        }
         int from = lyr.idx, i;
         for (i = from + 1; i < L.size(); i++) if (L.get(i).t.equals(t)) return i;
         for (i = 0; i <= from && i < L.size(); i++) if (L.get(i).t.equals(t)) return i;
@@ -157,7 +177,7 @@ final class MediaState {
             int i = locate(t);
             if (i < 0) return;
             lyr.idx = i;
-            anchor(lyr.lines.get(i).at);
+            if (!justSeeked()) anchor(lyr.lines.get(i).at); // 刚跳过：播放器不一定正好落在句首（常常早一点、报的还是上一句），进度以跳到的位置为准
             cur = i;
             chainRepeat();
         } else { // 没有整首：听到的新句子接在后面
@@ -223,6 +243,9 @@ final class MediaState {
             String[] s = new String[L.size()];
             for (int i = 0; i < s.length; i++) s[i] = L.get(i).t;
             lines = s;
+            long[] tm = new long[L.size()];
+            for (int i = 0; i < tm.length; i++) tm[i] = L.get(i).at;
+            times = tm;
             full = true;
             cur = -1;
             revLines++;
@@ -416,6 +439,7 @@ final class MediaState {
         }
         title = media == null ? "" : clean(str(media, "title")).isEmpty() ? "未知歌曲" : clean(str(media, "title"));
         artist = media == null ? "" : clean(str(media, "artist"));
+        pkg = media == null ? null : str(media, "packageName");
         dur = media != null && media.optLong("durationMs") > 0 ? media.optLong("durationMs") : 0;
         String raw = media == null ? "" : clean(str(media, "lyric"));
         if (!lyr.stale.isEmpty() && !raw.equals(lyr.stale)) lyr.stale = ""; // 歌词变了：上一首的那句过去了
@@ -424,7 +448,9 @@ final class MediaState {
         boolean posChanged = prev == null || !hasPos || prev.isNull("positionMs") || prev.optLong("positionMs") != mp;
         if (media != null && (!eq(tr, prevTr) || prev == null || posChanged || onNow != was)) {
             if (prev != null && eq(tr, prevTr) && was && !onNow && posSet) anchor(pos()); // 暂停：停在当前位置
-            else if (hasPos && (!eq(tr, prevTr) || prev == null || posChanged || !posSet)) anchor(mp);
+            else if (hasPos && (!eq(tr, prevTr) || prev == null || posChanged || !posSet)) {
+                if (!(eq(tr, prevTr) && justSeeked() && Math.abs(mp - pos()) > 4000)) anchor(mp); // 刚跳过、推来的还是跳之前的进度：不认
+            }
             else if (posSet) posAt = now(); // 接着放
         }
         if (pressed != null && media != null && onNow == pressed) { pressed = null; main.removeCallbacks(pressedTimer); } // 宿主推来的和按下去的对上了
@@ -451,7 +477,8 @@ final class MediaState {
         boolean on, playing, full, rawPlaying, canPlay;
         String track, title = "", artist = "", trackCmd = "";
         String[] lines = new String[0];
-        int cur = -1, revTrack, revLines, revCover, revCur;
+        long[] times;
+        int cur = -1, revTrack, revLines, revCover, revCur, heart = Player.HIDE;
         long dur, posBase, posAt;
         Bitmap cover;
         String coverTrack;
@@ -467,11 +494,27 @@ final class MediaState {
         Snap s = new Snap();
         s.on = on; s.playing = playing; s.full = full; s.rawPlaying = rawPlaying(); s.canPlay = host.canExec();
         s.track = track; s.title = title; s.artist = artist; s.trackCmd = trackCmd;
-        s.lines = lines; s.cur = cur;
+        s.lines = lines; s.times = times; s.cur = cur;
         s.revTrack = revTrack; s.revLines = revLines; s.revCover = revCover; s.revCur = revCur;
         s.dur = dur; s.posBase = pos(); s.posAt = now();
         s.cover = cover; s.coverTrack = coverTrack;
+        s.heart = heart;
         return s;
+    }
+
+    // ================= 跳到某一句（歌词定位线） =================
+    /** 跳过去：先按跳到的位置显示，歌词滚到那一句（宿主随后推来新的 positionMs、新的那句再对齐） */
+    void seekLocal(long ms) {
+        if (media == null) return;
+        anchor(ms);
+        seekedAt = now();
+        if (lyr != null && lyr.lines != null) {
+            int i = -1;
+            for (int k = 0; k < lyr.lines.size() && lyr.lines.get(k).at <= ms; k++) i = k;
+            if (i >= 0) { lyr.idx = i; lyr.line = lyr.lines.get(i).t; cur = i; revCur++; }
+            chainRepeat();
+        }
+        emit();
     }
 
     // ================= 播放控制 =================
