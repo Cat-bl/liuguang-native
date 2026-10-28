@@ -56,6 +56,7 @@ final class Ui extends FrameLayout {
     private final PathInterpolator ease = new PathInterpolator(0.22f, 1f, 0.36f, 1f);
     private boolean day, narrow, open, wait = true, blocked, shelfOn;
     private int locDir;
+    private Guide guide;
     private float locY = 0.5f;
     private String fsMode = "";
     private float rem = 10;
@@ -130,7 +131,7 @@ final class Ui extends FrameLayout {
     }
 
     // ================= 外面交进来的 =================
-    void setDay(boolean d) { if (d == day) return; day = d; colors(); }
+    void setDay(boolean d) { if (d == day) return; day = d; colors(); if (guide != null) guide.setDay(d); }
     /** 开场动画还没走完：右上角的键先藏着 */
     void setWait(boolean w0) { if (w0 == wait) return; wait = w0; fade(true); }
     /** 没连上宿主、没授权（上面盖着说明）：键藏起来、面板关上 */
@@ -148,6 +149,28 @@ final class Ui extends FrameLayout {
     void refresh() { if (open) rows(); }
     boolean isOpen() { return open; }
     void closeAll() { show(false); }
+
+    /** 新手引导（Guide）：看过了叫 done（收起来不算） */
+    void showGuide(Runnable done) {
+        if (guide != null) return;
+        guide = new Guide(getContext(), day, () -> { guide = null; done.run(); });
+        addView(guide, new LayoutParams(-1, -1));
+        guide.size(w, h, rem);
+    }
+
+    boolean guiding() { return guide != null; }
+
+    /** 封面在画面上的范围（占画面的比例） */
+    void guideHole(float l, float t, float r, float b) { if (guide != null) guide.hole(l * w, t * h, r * w, b * h); }
+
+    /** 返回键：算看过 */
+    void guideOk() { if (guide != null) guide.finish(); }
+
+    /** 应用藏起来了：收起来，不算看过 */
+    void guideHide() { if (guide != null) { guide.dismiss(); guide = null; } }
+
+    /** 开场走完、右上角的键出来了 */
+    boolean keysUp() { return !wait; }
 
     /** 歌单开着（返回键先关歌单） */
     void setShelfOn(boolean on) { shelfOn = on; }
@@ -263,6 +286,7 @@ final class Ui extends FrameLayout {
         locChip.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(0.22f));
         locChip.setPadding(px(0.24f), px(0.12f), px(0.24f), px(0.12f));
         if (locDir != 0) placeChip();
+        if (guide != null) guide.size(w, h, rem);
         colors();
     }
 

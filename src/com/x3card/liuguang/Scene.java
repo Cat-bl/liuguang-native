@@ -35,6 +35,7 @@ final class Scene implements GLSurfaceView.Renderer {
         void playIndex(int i);    // 歌单里点了第几首
         void shelfState(boolean open); // 歌单开了 / 关了（歌单键亮不亮、返回键关歌单）
         void locate(int dir, float y); // 正在放的那首跑出画面了：dir -1 在左边、1 在右边、0 不显示；y 是砖的中间在画面上多高（0～1）
+        void coverAt(float l, float t, float r, float b); // 新手引导开着：封面在画面上的范围（占画面的比例）
     }
 
     final Shelf shelf = new Shelf(this);
@@ -1301,6 +1302,28 @@ final class Scene implements GLSurfaceView.Renderer {
     private float[] introTimes() { return "intro".equals(introMode) ? new float[] { 0.75f, 1.45f, 2.7f, 3.25f } : new float[] { 0.3f, 0.95f, 2.15f, 2.7f }; }
     private boolean introFull() { return introOn && "intro".equals(introMode); }
 
+    // ================= 新手引导要知道封面在画面上的哪儿 =================
+    private volatile boolean trackCover;
+    private final float[] cvC = new float[4], cvWd = new float[4], cvClip = new float[4], cvPS = new float[16], cvRect = new float[4];
+
+    /** 新手引导开着：每帧算封面在画面上的范围，挪了一个像素以上才交出去 */
+    void trackCover(boolean on) { trackCover = on; cvRect[0] = -1; wake(); }
+
+    private void reportCover() {
+        G.mul(cvPS, P, S);
+        float l = 1e9f, t = 1e9f, r = -1e9f, b = -1e9f;
+        for (int i = 0; i < 4; i++) { // 玻璃砖正面的四个角
+            cvC[0] = (i & 1) == 0 ? -0.5f : 0.5f; cvC[1] = (i & 2) == 0 ? -0.5f : 0.5f; cvC[2] = 0.11f; cvC[3] = 1;
+            Matrix.multiplyMV(cvWd, 0, coverM, 0, cvC, 0);
+            Matrix.multiplyMV(cvClip, 0, cvPS, 0, cvWd, 0);
+            float x = cvClip[0] / cvClip[3] * 0.5f + 0.5f, y = 0.5f - cvClip[1] / cvClip[3] * 0.5f;
+            l = Math.min(l, x); r = Math.max(r, x); t = Math.min(t, y); b = Math.max(b, y);
+        }
+        if (cvRect[0] >= 0 && Math.abs(l - cvRect[0]) * W < 1 && Math.abs(t - cvRect[1]) * H < 1 && Math.abs(r - cvRect[2]) * W < 1 && Math.abs(b - cvRect[3]) * H < 1) return;
+        cvRect[0] = l; cvRect[1] = t; cvRect[2] = r; cvRect[3] = b;
+        host.coverAt(l, t, r, b);
+    }
+
     private void introStart(String mode) {
         introMode = mode;
         introOn = true;
@@ -1526,6 +1549,7 @@ final class Scene implements GLSurfaceView.Renderer {
         if (artTick(dt, full ? smooth(0.2f, 1.4f, it) : 1)) moving = true;
         float waterK = full ? smooth(0.2f, 1.4f, it) : 1;
         if (coverTick(dt, clock)) moving = true;
+        if (trackCover) reportCover();
         if (lyricsTick(st, dt, clock)) moving = true;
         if (seekTick(dt)) moving = true;
         if (titleTick(dt, full ? smooth(1.4f, 2.1f, it) : 1)) moving = true;

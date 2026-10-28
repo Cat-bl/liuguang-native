@@ -91,6 +91,7 @@ node build.mjs --install  # 打完用 adb install -r 装上（adb 要在 PATH �
 | `Rain.java` / `RainPick.java` / `BydWeather.java` | 雨珠、要不要下、读车机天气 |
 | `G.java` / `Txt.java` / `Palette.java` / `Spring.java` | GL 工具、歌词贴图和折行、封面取色、弹簧动画 |
 | `Ui.java` / `Settings.java` / `InfoView.java` / `FullActivity.java` | 设置面板、设置存取、连不上宿主或没授权时的说明、全屏页 |
+| `Guide.java` | 新手引导（第一次打开时说明封面能点也能划） |
 
 `assets/`：歌词字体得意黑（官方 ttf 原样）和它的许可。
 
