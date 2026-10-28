@@ -7,6 +7,8 @@
 
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="29" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <!-- 歌单里每首的封面是网上的图（QQ 音乐的 CDN）：普通权限，装上就有 -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <queries>
         <package android:name="com.wzw.bydmodule" />
     </queries>

@@ -6,12 +6,15 @@ import android.os.Bundle;
 import android.util.Log;
 
 /**
- * 跳到歌词某一句（宿主没有这个接口）：发给车机自带「多媒体」（com.byd.mediacenter）的导出服务入口，零权限——不用 root、不用通知使用权，
+ * 宿主没有的播放操作：发给车机自带「多媒体」（com.byd.mediacenter）的导出服务入口，零权限——不用 root、不用通知使用权，
  * 方向盘按键、通知栏走的也是这条。入口认一个整数 MediaAction + 一个 MediaParams 参数包：
  * - 跳进度 MediaAction=15，参数 position（毫秒）；车机把当前在放的那个音源跳过去。
- * 反编译「多媒体」确认：ControlConverter.convertAction 把 15 映射成 seek，AbstractOnlineMessageService 读 params 的 "position"（毫秒）/1000 交给播放器。
+ * - 收藏 / 取消收藏当前这首 MediaAction=10 / 11，不带参数。收没收藏从车机的媒体控制器读（BydMedia）。
+ * - 放播放队列里的第几首 MediaAction=14（playByIndex），参数 media_id = 序号（int，从 0 起，同 BydMedia 歌单的顺序）。实测序号精确（点第 50 首正好放这首）。
+ *   媒体控制器自己的 changePlayMusic(音源, id) 把歌曲 id 当 media_id 传过来，「多媒体」当序号用，会切错——不用它。
+ * 反编译「多媒体」确认：ControlConverter.convertAction 把 15 映射成 seek、10 / 11 映射成 collect / uncollect、14 映射成 playByIndex，
+ * AbstractOnlineMessageService 读 params 的 "position"（毫秒）/1000 交给播放器。
  * 实车验证过：发 seek 到 90 秒，进度跟着跳；别的音源 / 不是「多媒体」时这条 intent 没人接，不报错也不生效。
- * 以前这个功能连播放器的媒体会话做（要通知使用权），还带收藏红心；2026-10-28 用户让删掉红心、seek 改成这条零权限的路。
  */
 final class Player {
     private static final String PKG = "com.byd.mediacenter";
@@ -31,6 +34,40 @@ final class Player {
             return true;
         } catch (Exception e) {
             Log.w(Uiplus.TAG, "跳歌词失败", e);
+            return false;
+        }
+    }
+
+    /** 收藏（on）/ 取消收藏当前在放的这首。发出去返回真 */
+    static boolean favorite(Context ctx, boolean on) {
+        try {
+            Intent s = new Intent("byd.intent.action.START_MEDIA");
+            s.setClassName(PKG, CLS);
+            s.putExtra("MediaAction", on ? 10 : 11); // collect / uncollect
+            s.putExtra("MediaParams", new Bundle());
+            ctx.startService(s);
+            Log.w(Uiplus.TAG, "收藏 → " + on);
+            return true;
+        } catch (Exception e) {
+            Log.w(Uiplus.TAG, "收藏失败", e);
+            return false;
+        }
+    }
+
+    /** 放播放队列里第 index 首（序号从 0 起）。发出去返回真 */
+    static boolean playIndex(Context ctx, int index) {
+        try {
+            Intent s = new Intent("byd.intent.action.START_MEDIA");
+            s.setClassName(PKG, CLS);
+            s.putExtra("MediaAction", 14); // playByIndex
+            Bundle p = new Bundle();
+            p.putInt("media_id", index);
+            s.putExtra("MediaParams", p);
+            ctx.startService(s);
+            Log.w(Uiplus.TAG, "放第 " + index + " 首");
+            return true;
+        } catch (Exception e) {
+            Log.w(Uiplus.TAG, "点歌失败", e);
             return false;
         }
     }

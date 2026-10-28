@@ -110,14 +110,26 @@ public final class Uiplus {
     /** 界面显示时连上，藏起来时断开（宿主那边的订阅、会话跟着释放） */
     public void start() {
         main.removeCallbacks(later);
+        if (mock != null) { // 模拟器里的假数据：马上就算连上、有授权
+            if (started) return;
+            started = true;
+            sid = "mock"; read = exec = backend = true;
+            main.post(() -> { listener.onPermissions(true, true); listener.onState("ready", "模拟数据"); });
+            return;
+        }
         if (started) { refresh(); return; }
         started = true;
         bind();
     }
 
+    private Mock mock;
+
+    /** 模拟器里用假数据（见 Mock）：不连宿主，请求、封面都交给它 */
+    void useMock(Mock m) { mock = m; m.attachHost(listener); }
+
     /** 进后台：先不断开（宿主的授权确认页会把应用盖住，授权申请挂在这个会话上），30 秒后再断；等授权时最多等 5 分钟 */
     public void background() {
-        if (!started) return;
+        if (!started || mock != null) return;
         main.removeCallbacks(later);
         main.postDelayed(later, authPending ? 300000 : 30000);
     }
@@ -272,6 +284,7 @@ public final class Uiplus {
 
     /** 发一个请求（方法、参数同网页卡片的 uiplus），结果回到主线程 */
     public void request(String method, JSONObject params, Reply reply) {
+        if (mock != null) { mock.request(method, params, reply); return; }
         final String s = sid;
         final IBinder r = remote;
         if (s == null || r == null) { if (reply != null) reply.done(null, "SESSION_CLOSED", "还没连上宿主"); return; }
@@ -297,6 +310,7 @@ public final class Uiplus {
 
     /** 读封面（工作线程里阻塞调用；拿不到返回 null）：url 是媒体快照里的 coverUrl，交给宿主的是最后那段令牌 */
     public ParcelFileDescriptor openCover(String url) {
+        if (mock != null) return mock.cover(url);
         String s = sid;
         IBinder r = remote;
         if (s == null || r == null || url == null) return null;

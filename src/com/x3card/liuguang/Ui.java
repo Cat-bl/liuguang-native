@@ -19,7 +19,8 @@ import android.widget.TextView;
 
 /**
  * 叠在 3D 场景上面的按键和面板（照网页版的 index.html / style.css）：右上角齿轮、全屏键在它左边（竖屏在它下面），开场动画快完了才淡入、开着面板时藏起来；
- * 设置面板从右边滑出（竖屏整张盖住），每项一排分段按钮；底部中间的提示条几秒后淡出。尺寸按窗口高度算（1rem = 高度 / 10.52，同网页版）。
+ * 设置面板从右边滑出（竖屏整张盖住），每项一排分段按钮； * 歌单里正在放的那首跑出画面时，那一边出一个"正在放"，点了回到它；
+ * 底部中间的提示条几秒后淡出。尺寸按窗口高度算（1rem = 高度 / 10.52，同网页版）。
  * 深浅色跟着场景。没有按键、面板可点的地方不接手势（交给下面的场景）
  */
 @SuppressLint("ViewConstructor")
@@ -27,6 +28,7 @@ final class Ui extends FrameLayout {
     interface Actions {
         void set(String key, Object value);
         void fullscreen();
+        void locate(); // 歌单里回到正在放的那首
     }
 
     private static final Object[][] ON = { { true, "开" }, { false, "关" } };
@@ -50,9 +52,11 @@ final class Ui extends FrameLayout {
     private final ImageView gear, fs, close;
     private final LinearLayout panel, body;
     private final ScrollView scroll;
-    private final TextView title, toast;
+    private final TextView title, toast, locChip;
     private final PathInterpolator ease = new PathInterpolator(0.22f, 1f, 0.36f, 1f);
-    private boolean day, narrow, open, wait = true, blocked;
+    private boolean day, narrow, open, wait = true, blocked, shelfOn;
+    private int locDir;
+    private float locY = 0.5f;
     private String fsMode = "";
     private float rem = 10;
     private int w = 1, h = 1;
@@ -65,7 +69,7 @@ final class Ui extends FrameLayout {
         this.st = st;
         this.act = act;
         gear = key(R.drawable.ic_gear);
-        gear.setOnClickListener(v -> panel(true));
+        gear.setOnClickListener(v -> show(true));
         fs = key(R.drawable.ic_full);
         fs.setVisibility(GONE);
         fs.setOnClickListener(v -> act.fullscreen());
@@ -85,7 +89,7 @@ final class Ui extends FrameLayout {
         head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         close = new ImageView(c);
         close.setImageResource(R.drawable.ic_close);
-        close.setOnClickListener(v -> panel(false));
+        close.setOnClickListener(v -> show(false));
         head.addView(close);
         panel.addView(head);
         scroll = new ScrollView(c);
@@ -96,6 +100,14 @@ final class Ui extends FrameLayout {
         scroll.addView(body, new LayoutParams(-1, -2));
         panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         addView(panel);
+
+        locChip = new TextView(c); // 歌单里的"正在放"：正在放的那首跑出画面时出在那一边
+        locChip.setGravity(Gravity.CENTER);
+        locChip.setSingleLine(true);
+        locChip.setAlpha(0);
+        locChip.setVisibility(INVISIBLE);
+        locChip.setOnClickListener(v -> act.locate());
+        addView(locChip);
 
         toast = new TextView(c);
         toast.setGravity(Gravity.CENTER);
@@ -135,7 +147,31 @@ final class Ui extends FrameLayout {
     /** 设置在别处改了（全屏页和小窗口共用一份）：面板开着就重画 */
     void refresh() { if (open) rows(); }
     boolean isOpen() { return open; }
-    void closeAll() { panel(false); }
+    void closeAll() { show(false); }
+
+    /** 歌单开着（返回键先关歌单） */
+    void setShelfOn(boolean on) { shelfOn = on; }
+
+    boolean shelfOn() { return shelfOn; }
+
+    /** 歌单里正在放的那首跑出画面了：dir -1 在左边、1 在右边、0 不显示；y 是砖的中间在画面上多高（0～1） */
+    void setLocate(int dir, float y) {
+        if (dir != 0) { locY = y; if (dir != locDir) { locChip.setText(dir < 0 ? "‹  正在放" : "正在放  ›"); locDir = dir; } placeChip(); }
+        else locDir = 0;
+        boolean show = dir != 0 && !open;
+        locChip.animate().cancel();
+        locChip.setEnabled(show);
+        if (show) locChip.setVisibility(VISIBLE);
+        locChip.animate().alpha(show ? 1 : 0).setDuration(show ? 320 : 220).withEndAction(() -> { if (locChip.getAlpha() == 0) locChip.setVisibility(INVISIBLE); }).start();
+    }
+
+    private void placeChip() {
+        LayoutParams q = new LayoutParams(-2, -2, Gravity.TOP | (locDir < 0 ? Gravity.START : Gravity.END));
+        q.leftMargin = q.rightMargin = px(0.26f);
+        locChip.setLayoutParams(q);
+        locChip.measure(MeasureSpec.UNSPECIFIED, MeasureSpec.UNSPECIFIED);
+        locChip.setTranslationY(locY * h - locChip.getMeasuredHeight() / 2f);
+    }
 
     private Runnable toastOff;
 
@@ -148,7 +184,8 @@ final class Ui extends FrameLayout {
         postDelayed(toastOff, 3200);
     }
 
-    void panel(boolean on) {
+    /** 打开 / 关上设置面板 */
+    private void show(boolean on) {
         if (on == open) return;
         open = on;
         panel.animate().cancel();
@@ -168,9 +205,16 @@ final class Ui extends FrameLayout {
     private void fade(boolean anim) {
         boolean show = !wait && !open && !blocked;
         for (View v : new View[] { gear, fs }) {
+            float a = show ? 0.72f : 0;
             v.animate().cancel();
             v.setEnabled(show);
-            if (anim) v.animate().alpha(show ? 0.72f : 0).setDuration(500).start(); else v.setAlpha(show ? 0.72f : 0);
+            if (anim) v.animate().alpha(a).setDuration(500).start(); else v.setAlpha(a);
+        }
+        if (locDir != 0) { // 面板盖着时"正在放"先藏起来
+            locChip.animate().cancel();
+            locChip.setEnabled(!open);
+            if (!open) locChip.setVisibility(VISIBLE);
+            locChip.animate().alpha(open ? 0 : 1).setDuration(anim ? 320 : 0).start();
         }
     }
 
@@ -216,6 +260,9 @@ final class Ui extends FrameLayout {
         toast.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(0.24f));
         toast.setLineSpacing(0, 1.2f);
         toast.setPadding(px(0.26f), px(0.12f), px(0.26f), px(0.12f));
+        locChip.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(0.22f));
+        locChip.setPadding(px(0.24f), px(0.12f), px(0.24f), px(0.12f));
+        if (locDir != 0) placeChip();
         colors();
     }
 
@@ -238,6 +285,8 @@ final class Ui extends FrameLayout {
         GradientDrawable tb = round(day ? 0xe0ffffff : 0x9e000000, px(0.3f));
         toast.setBackground(tb);
         toast.setTextColor(day ? 0xff151922 : 0xffffffff);
+        locChip.setBackground(round(day ? 0xe6ffffff : 0xa6000000, px(0.3f)));
+        locChip.setTextColor(day ? 0xff151922 : 0xffffffff);
         if (open) rows();
     }
 
