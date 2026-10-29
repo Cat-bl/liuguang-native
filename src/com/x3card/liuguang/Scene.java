@@ -438,6 +438,9 @@ final class Scene implements GLSurfaceView.Renderer {
         texFront = texFront2 = texBack = 0;
         texArt[0] = texArt[1] = texArt[2] = 0;
         aurFbo.forget(); waterFbo.forget();
+        int[] smp = new int[1];
+        GLES30.glGetIntegerv(GLES30.GL_SAMPLES, smp, 0);
+        waterFbo.samples = smp[0]; // 画布开着抗锯齿：倒影也一样多重采样
         rain.initGL();
         timeTex = 0;
         seekTex = 0;
@@ -1641,6 +1644,7 @@ final class Scene implements GLSurfaceView.Renderer {
         GLES30.glDepthMask(true); // 能写深度才清得掉（上一帧画透明的东西时关了）
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
         drawScene(Vr, Pr, true, waterFbo.w, waterFbo.h, ribK, waterK, 0);
+        waterFbo.resolve();
     }
 
     private static float dot(float[] a, float[] b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }

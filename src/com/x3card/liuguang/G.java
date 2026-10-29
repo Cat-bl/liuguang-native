@@ -302,6 +302,8 @@ final class G {
     /** 离屏缓冲：一张颜色贴图（RGBA8）+ 可选的深度缓冲 */
     static final class Fbo {
         int fb, tex, depth, w, h;
+        int samples; // 大于 0：先画进这么多倍采样的缓冲，resolve() 解析到 tex
+        private int msFb, msColor;
         final boolean withDepth;
         Fbo(boolean withDepth) { this.withDepth = withDepth; }
 
@@ -322,7 +324,9 @@ final class G {
             fb = a[0];
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fb);
             GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, tex, 0);
-            if (withDepth) {
+            if (samples > 0) multisample(a);
+            if (withDepth && msFb == 0) {
+                GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fb);
                 GLES30.glGenRenderbuffers(1, a, 0);
                 depth = a[0];
                 GLES30.glBindRenderbuffer(GLES30.GL_RENDERBUFFER, depth);
@@ -332,16 +336,58 @@ final class G {
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
         }
 
-        void bind() { GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fb); GLES30.glViewport(0, 0, w, h); }
+        /** 多重采样的颜色（和深度）缓冲；驱动不支持就不用，照常画进 tex */
+        private void multisample(int[] a) {
+            GLES30.glGetIntegerv(GLES30.GL_MAX_SAMPLES, a, 0);
+            int n = Math.min(samples, a[0]);
+            if (n < 2) return;
+            GLES30.glGenFramebuffers(1, a, 0);
+            msFb = a[0];
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, msFb);
+            GLES30.glGenRenderbuffers(1, a, 0);
+            msColor = a[0];
+            GLES30.glBindRenderbuffer(GLES30.GL_RENDERBUFFER, msColor);
+            GLES30.glRenderbufferStorageMultisample(GLES30.GL_RENDERBUFFER, n, GLES30.GL_RGBA8, w, h);
+            GLES30.glFramebufferRenderbuffer(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_RENDERBUFFER, msColor);
+            if (withDepth) {
+                GLES30.glGenRenderbuffers(1, a, 0);
+                depth = a[0];
+                GLES30.glBindRenderbuffer(GLES30.GL_RENDERBUFFER, depth);
+                GLES30.glRenderbufferStorageMultisample(GLES30.GL_RENDERBUFFER, n, GLES30.GL_DEPTH_COMPONENT24, w, h);
+                GLES30.glFramebufferRenderbuffer(GLES30.GL_FRAMEBUFFER, GLES30.GL_DEPTH_ATTACHMENT, GLES30.GL_RENDERBUFFER, depth);
+            }
+            if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) freeMs();
+        }
+
+        void bind() { GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, msFb != 0 ? msFb : fb); GLES30.glViewport(0, 0, w, h); }
+
+        private static final int[] DEPTH_ATT = { GLES30.GL_DEPTH_ATTACHMENT };
+
+        /** 画完：多重采样的解析到 tex（深度先丢掉，不用存回内存） */
+        void resolve() {
+            if (msFb == 0) return;
+            if (withDepth) GLES30.glInvalidateFramebuffer(GLES30.GL_FRAMEBUFFER, 1, DEPTH_ATT, 0);
+            GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, msFb);
+            GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, fb);
+            GLES30.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_NEAREST);
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
+        }
 
         /** GL 环境丢了：旧编号作废，不去删（新环境里同样的编号可能已经是别的东西） */
-        void forget() { fb = tex = depth = 0; w = h = 0; }
+        void forget() { fb = tex = depth = msFb = msColor = 0; w = h = 0; }
+
+        private void freeMs() {
+            if (msFb != 0) GLES30.glDeleteFramebuffers(1, new int[] { msFb }, 0);
+            if (msColor != 0) GLES30.glDeleteRenderbuffers(1, new int[] { msColor }, 0);
+            if (depth != 0) GLES30.glDeleteRenderbuffers(1, new int[] { depth }, 0);
+            msFb = msColor = depth = 0;
+        }
 
         void free() {
+            freeMs();
             if (fb != 0) GLES30.glDeleteFramebuffers(1, new int[] { fb }, 0);
             if (tex != 0) { GLES30.glDeleteTextures(1, new int[] { tex }, 0); G.forget(tex); }
-            if (depth != 0) GLES30.glDeleteRenderbuffers(1, new int[] { depth }, 0);
-            fb = tex = depth = 0;
+            fb = tex = 0;
             w = h = 0;
         }
     }
