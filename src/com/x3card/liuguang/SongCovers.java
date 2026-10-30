@@ -1,11 +1,13 @@
 package com.x3card.liuguang;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.net.Uri;
 import android.net.http.HttpResponseCache;
 import android.os.Process;
 import android.os.SystemClock;
@@ -26,21 +28,23 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 歌单长廊（Shelf）的封面（BydMedia.Song.cover，要联网）。两种：
+ * 歌单长廊（Shelf）的封面（BydMedia.Song.cover）。两种：
  * - 长廊里的砖：256 的方图，连同 128 / 64 / 32 三级缩小图在后台线程里缩好（GL 线程按格传进图集，不用整张重新生成缩小图）；
  * - 中间那块停下来时的大图：512 的方图 + 取色（天空跟着变色用）。
  * 各音源给的地址不一样：QQ 音乐是 https 的 120×120（T002R120x120M…，换成 R300x300 / R500x500 就是大的）；
  * 网易云（p*.music.126.net）、酷狗（imge.kugou.com/stdmusic/<尺寸>/）、酷我（img*.kuwo.cn/star/albumcover/<尺寸>/）都是 http，网易云、酷狗还是一千多像素的原图。
  * 所以地址一律换成 https（安卓 9 起默认不让应用走明文 http；这几家都支持 https），按要的大小改地址（sized），取不到再取原图；
  * 解码时先看尺寸、按 2 的倍数缩到够用再裁成方的（原图再大也不会把内存撑爆），按 RGB_565 存（JPEG 没有透明，省一半）。
+ * 本地音乐（本地、U 盘、SD 卡）给的是媒体库的专辑封面 content://media/external/audio/albumart/<专辑号>（封面在歌曲文件里，没有的读不到），不用权限就能读，直接读不联网。
+ * 没有封面地址、取不到的：按歌名生成一张（MediaState.makeCover，同正在放的歌没封面时），不留空白；网上的取不到时先用生成的，过一会儿再取。
  * 下载过的放在应用的缓存目录里（HttpResponseCache，最多 24MB，按 CDN 给的缓存时间），关了歌单再打开、下次开机都不用重新下。
- * 三个低优先级的后台线程（不和画 3D 的线程抢），同一张正在取的不重复取，取不到的 20 秒内不再试。
+ * 三个低优先级的后台线程（不和画 3D 的线程抢），同一张正在取的不重复取，网上取不到的 20 秒内不再试。
  * 取到了在后台线程里交给 Sink（调用方自己转到要用的线程）。全部线程安全；页面关了 quit
  */
 final class SongCovers {
     interface Sink {
-        /** mips：砖用的四级（0 是 256）或者大图（一张 512）；null 是取不到 */
-        void got(String url, boolean big, Bitmap[] mips, Palette pal);
+        /** key：Song.art；mips：砖用的四级（0 是 256）或者大图（一张 512）；fake：网上的取不到，先给的生成的（过一会儿还能再取） */
+        void got(String key, boolean big, Bitmap[] mips, Palette pal, boolean fake);
     }
 
     static final int TILE = 256, LEVELS = 4, BIG = 512;
@@ -50,8 +54,10 @@ final class SongCovers {
     private final Map<String, Long> failedAt = new HashMap<>();
     private final Set<String> loading = new HashSet<>();
     private final ExecutorService pool;
+    private final ContentResolver cr;
 
     SongCovers(Context ctx) {
+        cr = ctx.getContentResolver();
         try { if (HttpResponseCache.getInstalled() == null) HttpResponseCache.install(new File(ctx.getCacheDir(), "covers"), 24L * 1024 * 1024); }
         catch (Exception e) { Log.w(Uiplus.TAG, "封面的磁盘缓存装不上", e); }
         ThreadPoolExecutor p = new ThreadPoolExecutor(3, 3, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
@@ -63,10 +69,10 @@ final class SongCovers {
         pool = p;
     }
 
-    /** 去取（取到了、取不到都交给 sink）；同一张正在取的、刚取不到的不取，返回假 */
-    boolean load(final String url, final boolean big, final Sink sink) {
-        if (url == null || url.isEmpty() || pool.isShutdown()) return false;
-        final String key = (big ? "B" : "T") + url;
+    /** 去取这首的封面（取到了、生成的都交给 sink）；同一张正在取的、网上刚取不到的不取，返回假 */
+    boolean load(final BydMedia.Song song, final boolean big, final Sink sink) {
+        if (pool.isShutdown()) return false;
+        final String url = song.cover, key = (big ? "B" : "T") + song.art;
         synchronized (this) {
             if (loading.contains(key)) return false;
             Long f = failedAt.get(key);
@@ -75,23 +81,24 @@ final class SongCovers {
         }
         try {
             pool.execute(() -> {
-                Bitmap[] out = null;
+                Bitmap[] out;
                 Palette pal = null;
-                byte[] bytes = fetchAny(url, big ? 500 : 300);
-                if (bytes != null) {
-                    Bitmap b = square(bytes, big ? BIG : TILE);
-                    if (b != null && big) { out = new Bitmap[] { b }; pal = Palette.of(b); }
-                    else if (b != null) {
-                        out = new Bitmap[LEVELS];
-                        out[0] = b;
-                        for (int l = 1; l < LEVELS; l++) out[l] = Bitmap.createScaledBitmap(out[l - 1], TILE >> l, TILE >> l, true);
-                    }
+                int n = big ? BIG : TILE;
+                byte[] bytes = url.isEmpty() ? null : fetchAny(url, big ? 500 : 300);
+                Bitmap b = bytes == null ? null : square(bytes, n);
+                boolean fake = false;
+                if (b == null) { b = fit(MediaState.makeCover(song.title, song.artist), n); fake = url.startsWith("http"); }
+                if (big) { out = new Bitmap[] { b }; pal = Palette.of(b); }
+                else {
+                    out = new Bitmap[LEVELS];
+                    out[0] = b;
+                    for (int l = 1; l < LEVELS; l++) out[l] = Bitmap.createScaledBitmap(out[l - 1], TILE >> l, TILE >> l, true);
                 }
                 synchronized (this) {
                     loading.remove(key);
-                    if (out == null) failedAt.put(key, SystemClock.uptimeMillis()); else failedAt.remove(key);
+                    if (fake) failedAt.put(key, SystemClock.uptimeMillis()); else failedAt.remove(key);
                 }
-                sink.got(url, big, out, pal);
+                sink.got(song.art, big, out, pal, fake);
             });
             return true;
         } catch (Exception e) { // 线程池关了
@@ -113,8 +120,9 @@ final class SongCovers {
         return u.replaceFirst("^(https://img\\d*\\.kuwo\\.cn/star/albumcover/)\\d+/", "$1" + (px <= 300 ? 300 : 500) + "/");
     }
 
-    /** 先取改过大小的，取不到再取原图 */
-    private static byte[] fetchAny(String url, int px) {
+    /** 先取改过大小的，取不到再取原图；媒体库的封面直接读 */
+    private byte[] fetchAny(String url, int px) {
+        if (url.startsWith("content://")) return read(url);
         String a = sized(url, px), b = https(url);
         byte[] r = fetch(a);
         return r != null || a.equals(b) ? r : fetch(b);
@@ -143,7 +151,21 @@ final class SongCovers {
         }
     }
 
-    /** 解码成 n×n 的方图（不是方的居中裁）：先只看尺寸，按 2 的倍数缩到短边不小于 n 再解 */
+    private byte[] read(String url) {
+        try (InputStream in = cr.openInputStream(Uri.parse(url))) {
+            if (in == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream(32768);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); if (out.size() > MAX_BYTES) return null; }
+            return out.toByteArray();
+        } catch (Exception e) {
+            Log.w(Uiplus.TAG, "歌单封面读不到：" + url + "（" + e + "）");
+            return null;
+        }
+    }
+
+    /** 解码成 n×n 的方图：先只看尺寸，按 2 的倍数缩到短边不小于 n 再解 */
     private static Bitmap square(byte[] bytes, int n) {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
@@ -155,7 +177,11 @@ final class SongCovers {
         o.inSampleSize = sample;
         o.inPreferredConfig = Bitmap.Config.RGB_565;
         Bitmap src = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
-        if (src == null) return null;
+        return src == null ? null : fit(src, n);
+    }
+
+    /** 画成 n×n 的方图（不是方的居中裁，RGB_565），src 用完还掉 */
+    private static Bitmap fit(Bitmap src, int n) {
         int w = src.getWidth(), h = src.getHeight(), s = Math.min(w, h);
         Bitmap out = Bitmap.createBitmap(n, n, Bitmap.Config.RGB_565);
         new Canvas(out).drawBitmap(src, new Rect((w - s) / 2, (h - s) / 2, (w + s) / 2, (h + s) / 2), new Rect(0, 0, n, n), new Paint(Paint.FILTER_BITMAP_FLAG));

@@ -1,5 +1,6 @@
 package com.x3card.liuguang;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -70,6 +71,14 @@ final class MediaState {
     private long userPauseAt;
     private int gen;
     private long seekedAt = -1; // 刚在这里跳到某一句（seekLocal）的时候：之后几秒宿主推来的歌词、进度可能还是跳之前的
+    private String lyKey, lyTrack; // 歌名里装的是歌词（见 lyricTrack）：这首按 播放器|时长 认，lyTrack 是认准的这首的编号
+    // 歌名里装的是歌词（蓝牙）时在这里按了暂停：手机常常停了还一直报"在放"（宿主就当在放）。
+    // 手机发来新的一句、宿主报的播放状态变了、换了歌、在这里按了播放或上下首之前，都当它停着
+    private boolean holdPause;
+    private long holdAt;
+    private Runnable repause; // 发给「多媒体」的暂停过 1 秒宿主还报在放：再发一次（蓝牙：第一次只停了声音，第二次手机才报停，「多媒体」自己的暂停键也要按两下）
+    private String artPath, artArtist; // 车机媒体控制器给的本地封面文件（蓝牙音乐），连同它是哪首的（歌手栏、时长）
+    private long artDur;
 
     private static final class Line { final String t; final long at; Line(String t, long at) { this.t = t; this.at = at; } }
 
@@ -78,6 +87,9 @@ final class MediaState {
         List<Line> lines;
         int idx = -1, tries, holdIdx = -2;
         long asked, start = -1;
+        boolean noFull; // 宿主给的整首和手机发来的句子对不上（搜错了歌）：这首不再要
+        String missLine; // 歌名里装的是歌词时，这句在宿主给的整首里找不到（手机发的署名行宿主的歌词里不一定有）：等下一句再比
+        int misses;
         final List<String> heard = new ArrayList<>();
     }
 
@@ -99,7 +111,7 @@ final class MediaState {
     }
 
     // ================= 播放位置 =================
-    private boolean rawPlaying() { return media != null && media.optBoolean("playing"); }
+    private boolean rawPlaying() { return media != null && media.optBoolean("playing") && !holdPause; }
     private void anchor(long p) { posTrack = track; posVal = p; posAt = now(); posSet = true; }
 
     long pos() {
@@ -111,6 +123,7 @@ final class MediaState {
     // ================= 歌词 =================
     private void newTrack(String id, String stale, boolean live) {
         if (lyrRetry != null) main.removeCallbacks(lyrRetry);
+        holdPause = false;
         stopRepeat();
         seekedAt = -1;
         lyr = new Lyr();
@@ -166,10 +179,33 @@ final class MediaState {
             return best;
         }
         int from = lyr.idx, i;
-        for (i = from + 1; i < L.size(); i++) if (L.get(i).t.equals(t)) return i;
-        for (i = 0; i <= from && i < L.size(); i++) if (L.get(i).t.equals(t)) return i;
+        for (i = from + 1; i < L.size(); i++) if (same(L.get(i).t, t)) return i;
+        for (i = 0; i <= from && i < L.size(); i++) if (same(L.get(i).t, t)) return i;
         return -1;
     }
+
+    /** 是不是同一句：手机发来的句子（歌名里装的是歌词时）和宿主搜来的整首可能差空格、标点 */
+    private boolean same(String a, String b) {
+        if (a.equals(b)) return true;
+        return lyKey != null && bare(a).equals(bare(b)) && !bare(a).isEmpty();
+    }
+
+    /** 宿主的歌曲编号（播放器|歌名|歌手栏|时长）去掉歌名比：歌名里装的是歌词时编号带着当时那句，宿主找整首用的是那时的编号 */
+    private static boolean sameSong(String a, String b) {
+        if (a == null || b == null) return false;
+        int i = a.indexOf('|'), j = b.indexOf('|'), k = a.lastIndexOf('|', a.lastIndexOf('|') - 1), l = b.lastIndexOf('|', b.lastIndexOf('|') - 1);
+        return i > 0 && k > i && j > 0 && l > j && a.substring(0, i).equals(b.substring(0, j)) && a.substring(k).equals(b.substring(l));
+    }
+
+    /** 歌手栏是"歌名-歌手"、歌名栏里两样都有（手机换歌时先发的"歌名 - 歌手"）：别的音源的歌手名里正好带"-"（A-Lin）不算 */
+    private static boolean songOf(String a, String t) {
+        int k = a.lastIndexOf('-');
+        if (k <= 0 || k >= a.length() - 1) return false;
+        String b = bare(t), n = bare(a.substring(0, k)), s = bare(a.substring(k + 1));
+        return !n.isEmpty() && !s.isEmpty() && b.contains(n) && b.contains(s);
+    }
+
+    private static String bare(String s) { return s.replaceAll("[\\s\\p{P}\\p{S}]+", "").toLowerCase(); }
 
     private void setLine(String t) {
         lyr.line = t;
@@ -216,7 +252,8 @@ final class MediaState {
     private void stopRepeat() { if (repeat != null) { main.removeCallbacks(repeat); repeat = null; } }
 
     private void loadLyrics() {
-        if (media == null || str(media, "trackId") == null || lyr == null || lyr.lines != null || now() - lyr.asked < 10000 || !host.ready()) return;
+        if (media == null || str(media, "trackId") == null || lyr == null || lyr.lines != null || lyr.noFull || now() - lyr.asked < 10000 || !host.ready()) return;
+        if (lyKey != null && lyr.line.equals(lyr.missLine)) return;
         lyr.asked = now();
         final int g = gen;
         final String id = str(media, "trackId");
@@ -224,7 +261,7 @@ final class MediaState {
         host.request("media.getLyrics", null, (r, code, msg) -> {
             if (g != gen || lyr != mine) return;
             JSONArray arr = r == null ? null : r.optJSONArray("lines");
-            if (r == null || !id.equals(str(r, "trackId")) || arr == null || arr.length() == 0) {
+            if (r == null || !(lyKey != null ? sameSong(id, str(r, "trackId")) : id.equals(str(r, "trackId"))) || arr == null || arr.length() == 0) {
                 if (++mine.tries <= 3) {
                     if (lyrRetry != null) main.removeCallbacks(lyrRetry);
                     lyrRetry = () -> { if (lyr == mine) { mine.asked = 0; loadLyrics(); } };
@@ -239,13 +276,23 @@ final class MediaState {
                 if (!t.isEmpty()) L.add(new Line(t, o.optLong("timeMs")));
             }
             if (L.isEmpty()) return;
+            if (lyKey != null) { // 歌名是正在唱的那句：宿主是按当时的歌名搜的整首，得对得上手机发来的这句才用（只用它的句子和时间轴）
+                if (mine.line.isEmpty()) { mine.asked = 0; return; } // 还不知道唱到哪：下一句来了再要
+                boolean hit = false;
+                for (Line l : L) if (same(l.t, mine.line)) { hit = true; break; }
+                if (!hit) {
+                    if (++mine.misses >= 4) mine.noFull = true;
+                    else { mine.missLine = mine.line; mine.asked = 0; }
+                    return;
+                }
+            }
             mine.lines = L;
             String[] s = new String[L.size()];
             for (int i = 0; i < s.length; i++) s[i] = L.get(i).t;
             lines = s;
             long[] tm = new long[L.size()];
             for (int i = 0; i < tm.length; i++) tm[i] = L.get(i).at;
-            times = tm;
+            times = lyKey != null ? null : tm; // 蓝牙（歌名里装的是歌词）跳不了进度（「多媒体」回 unsupported method seek）：不给歌词定位线
             full = true;
             cur = -1;
             revLines++;
@@ -277,6 +324,41 @@ final class MediaState {
         java.util.zip.CRC32 c = new java.util.zip.CRC32();
         c.update(b);
         return (c.getValue() << 24) ^ b.length;
+    }
+
+    /** 车机媒体控制器给的本地封面文件（MainActivity 转过来）；变了重新挑封面 */
+    void artFile(String path, String artist, long dur) {
+        if (eq(path, artPath) && eq(artist, artArtist) && dur == artDur) return;
+        artPath = path; artArtist = artist; artDur = dur;
+        if (media != null) syncCover();
+    }
+
+    /** 读存储的权限刚给了：本地封面重新读 */
+    void recheckCover() {
+        coverKey = "";
+        if (media != null) syncCover();
+    }
+
+    /** 对得上正在放的这首（歌手栏、时长一样）的本地封面文件 */
+    private String localArt() {
+        if (artPath == null || media == null || artDur != media.optLong("durationMs") || !clean(str(media, "artist")).equals(artArtist)) return null;
+        return artPath;
+    }
+
+    /** 读本地封面文件（没有读存储的权限时读不到：先用按歌名生成的，给了权限 recheckCover 再读） */
+    private void readArt(final String file, final String key) {
+        final String t = title, a = artist;
+        io.post(() -> {
+            Bitmap b = null;
+            try { Bitmap src = BitmapFactory.decodeFile(file); if (src != null) b = square(src); } catch (Exception e) { Log.w(Uiplus.TAG, "本地封面读不出来：" + file, e); }
+            final Bitmap fb = b;
+            main.post(() -> {
+                if (!coverKey.equals(key)) return;
+                coverHash = Long.MIN_VALUE;
+                hashTrack = track;
+                setCover(fb != null ? fb : makeCover(t, a), key);
+            });
+        });
     }
 
     private void setCover(Bitmap b, String key) {
@@ -401,12 +483,15 @@ final class MediaState {
         String url = str(media, "coverUrl");
         if (url == null && pauseTimer != null) return; // 换歌的空档：先别收
         if (url == null) url = "";
-        final String key = (url.isEmpty() ? "gen" : url) + "#" + (track == null ? "" : track);
+        final String file = url.isEmpty() ? localArt() : null;
+        final String key = (file != null ? "file:" + file : url.isEmpty() ? "gen:" + title : url) + "#" + (track == null ? "" : track);
         if (key.equals(coverKey)) return;
+        if (file == null && url.isEmpty() && coverKey.startsWith("file:") && coverKey.endsWith("#" + track)) return; // 这首已经用着本地封面：换歌时宿主、控制器先后到，歌手栏一时对不上，别换成生成的
         if (track != null && !track.equals(coverTrackSeen)) { coverTrackSeen = track; trackAt = SystemClock.uptimeMillis(); }
         coverKey = key;
         coverUrl = url;
         if (coverRetry != null) main.removeCallbacks(coverRetry);
+        if (file != null) { readArt(file, key); return; }
         if (url.isEmpty()) { // 没地址：刚换歌时先等等宿主给地址
             final String t = title, a = artist;
             Runnable gen = () -> { if (coverKey.equals(key)) { coverHash = Long.MIN_VALUE; hashTrack = track; setCover(makeCover(t, a), key); } };
@@ -418,6 +503,28 @@ final class MediaState {
     }
 
     // ================= 媒体快照 =================
+    /** 手机开了"车载蓝牙歌词"时，蓝牙发来的歌名是正在唱的那句、一句一换，歌名歌手塞在歌手栏（"皇帝-胡彦斌"），
+     *  宿主的 trackId 带着当时的歌名（每次蓝牙报一下暂停就换一个）。同一个播放器、同样时长的这首里歌名变了
+     *  （歌手栏没变，或者把上一条的歌名、歌手包了进去）就认定是这样，这首按 播放器|时长 认；
+     *  上一首是这样、新的一首像手机换歌时先发的那条（songOf）的，直接接着认。返回这首的编号，不是这样的返回 null */
+    private String lyricTrack(JSONObject prev, String tr) {
+        if (media == null) { lyKey = null; return null; }
+        long d = media.optLong("durationMs");
+        String key = str(media, "packageName") + "|" + d;
+        if (d > 0 && key.equals(lyKey)) return lyTrack;
+        boolean was = lyKey != null;
+        lyKey = null;
+        String a = clean(str(media, "artist")), t = clean(str(media, "title"));
+        if (d <= 0 || a.isEmpty() || prev == null) return null;
+        String pa = clean(str(prev, "artist")), pt = clean(str(prev, "title"));
+        boolean same = key.equals(str(prev, "packageName") + "|" + prev.optLong("durationMs"));
+        if (same && !t.equals(pt) && (a.equals(pa) || !pa.isEmpty() && a.contains(pa) || !pt.isEmpty() && a.contains(pt))) lyTrack = track;
+        else if (was && !same && songOf(a, t)) lyTrack = tr;
+        else return null;
+        lyKey = key;
+        return lyTrack;
+    }
+
     private boolean effPlaying() { return pressed != null ? pressed : rawPlaying() || pauseTimer != null; }
 
     /** 宿主推来的媒体快照（订阅推送的 data，或者 media.get 的结果）；initial：这个会话的第一条 */
@@ -426,22 +533,29 @@ final class MediaState {
         JSONObject prev = media;
         if (!initial && prev != null && m.optLong("updatedAt") > 0 && prev.optLong("updatedAt") > 0 && m.optLong("updatedAt") < prev.optLong("updatedAt")) return; // 晚到的旧快照
         media = "ok".equals(m.optString("status")) ? m : null;
+        if (holdPause && media != null && (prev == null || prev.optBoolean("playing") != media.optBoolean("playing")
+                || now() - holdAt > 1500 && !clean(str(media, "title")).equals(clean(str(prev, "title"))))) holdPause = false; // 手机接着放了
         boolean was = prev != null && prev.optBoolean("playing"), onNow = rawPlaying();
         String tr = media == null ? null : str(media, "trackId") != null ? str(media, "trackId") : str(media, "title");
         String prevTr = prev == null ? null : str(prev, "trackId") != null ? str(prev, "trackId") : str(prev, "title");
+        boolean wasLy = lyKey != null;
+        String lt = lyricTrack(prev, tr);
+        boolean ly = lt != null; // 歌名是正在唱的那句：当前句用它，歌名用歌手栏，宿主推的当前句不要（整首对得上手机发来的句子才用）
+        if (ly) { if (eq(lt, track)) prevTr = track; tr = lt; } // 还是这首：上一条也算这首（宿主的编号变了不算换歌）
         on = media != null;
         if (!eq(tr, track) || lyr == null) {
             track = tr;
-            newTrack(tr, prev == null ? null : clean(str(prev, "lyric")), !initial && prev != null);
+            newTrack(tr, prev == null || ly ? null : clean(str(prev, "lyric")), !initial && prev != null);
             revTrack++;
             trackCmd = lastCmd;
             lastCmd = "";
-        }
-        title = media == null ? "" : clean(str(media, "title")).isEmpty() ? "未知歌曲" : clean(str(media, "title"));
-        artist = media == null ? "" : clean(str(media, "artist"));
+        } else if (ly && !wasLy) newTrack(tr, null, false); // 刚认出来：前面宿主给的歌词不要了，从手机发来的这句接着往下
+        String tt = media == null ? "" : clean(str(media, ly ? "artist" : "title"));
+        title = media == null ? "" : tt.isEmpty() ? "未知歌曲" : tt;
+        artist = media == null || ly ? "" : clean(str(media, "artist"));
         pkg = media == null ? null : str(media, "packageName");
         dur = media != null && media.optLong("durationMs") > 0 ? media.optLong("durationMs") : 0;
-        String raw = media == null ? "" : clean(str(media, "lyric"));
+        String raw = media == null ? "" : clean(str(media, ly ? "title" : "lyric"));
         if (!lyr.stale.isEmpty() && !raw.equals(lyr.stale)) lyr.stale = ""; // 歌词变了：上一首的那句过去了
         boolean hasPos = media != null && media.has("positionMs") && !media.isNull("positionMs");
         long mp = hasPos ? media.optLong("positionMs") : 0;
@@ -455,14 +569,15 @@ final class MediaState {
         }
         if (pressed != null && media != null && onNow == pressed) { pressed = null; main.removeCallbacks(pressedTimer); } // 宿主推来的和按下去的对上了
         if (onNow) { if (pauseTimer != null) { main.removeCallbacks(pauseTimer); pauseTimer = null; } }
-        else if (!initial && was && pauseTimer == null && now() - userPauseAt > 5000) {
+        else if (!initial && was && !holdPause && pauseTimer == null && now() - userPauseAt > 5000) { // 按着暂停（holdPause）时宿主还报在放：不是刚停，不等
             pauseTimer = () -> { pauseTimer = null; playing = effPlaying(); syncCover(); emit(); };
             main.postDelayed(pauseTimer, 3500);
         }
+        if (lyr != null && !clean(str(media, "lyric")).isEmpty() && (prev == null || clean(str(prev, "lyric")).isEmpty())) lyr.asked = 0; // 宿主的当前句从没有到有：它刚拿到整首，马上要
         if (onNow) {
             loadLyrics();
             String t = raw.equals(lyr.stale) ? "" : raw; // 上一首留下的那句不显示
-            if (!t.isEmpty() && !t.equals(lyr.line) && lyricOk(t)) setLine(t);
+            if (!t.isEmpty() && !t.equals(lyr.line) && (ly || lyricOk(t))) setLine(t);
             else chainRepeat(); // 接着放、拖了进度：重新算什么时候往下走
         } else stopRepeat();
         playing = effPlaying();
@@ -487,6 +602,15 @@ final class MediaState {
         long pos() {
             long p = posBase + (rawPlaying ? SystemClock.elapsedRealtime() - posAt : 0);
             return Math.max(0, dur > 0 ? Math.min(p, dur) : p);
+        }
+
+        /** 和 o 画出来一样（位置差不到 50 毫秒也算）：场景不用醒 */
+        boolean same(Snap o) {
+            return o != null && on == o.on && playing == o.playing && full == o.full && rawPlaying == o.rawPlaying && canPlay == o.canPlay
+                && eq(track, o.track) && title.equals(o.title) && artist.equals(o.artist) && trackCmd.equals(o.trackCmd)
+                && lines == o.lines && times == o.times && cur == o.cur && revTrack == o.revTrack && revLines == o.revLines
+                && revCover == o.revCover && revCur == o.revCur && heart == o.heart && dur == o.dur
+                && cover == o.cover && eq(coverTrack, o.coverTrack) && Math.abs(pos() - o.pos()) < 50;
         }
     }
 
@@ -518,11 +642,12 @@ final class MediaState {
     }
 
     // ================= 播放控制 =================
-    /** cmd：toggle / next / previous；失败时 reply 带错误码 */
-    void press(String cmd, Uiplus.Reply reply) {
+    /** cmd：toggle / next / previous；失败时 reply 带错误码。在放的是「多媒体」时发给它的导出入口（见 Player），没有这个入口才经过宿主 */
+    void press(String cmd, Context ctx, Uiplus.Reply reply) {
         String m = "toggle".equals(cmd) ? "media.togglePlayPause" : "next".equals(cmd) ? "media.next" : "media.previous";
         lastCmd = cmd;
         final boolean toggle = "toggle".equals(cmd);
+        if (repause != null) { main.removeCallbacks(repause); repause = null; }
         if (toggle) {
             boolean want = !playing;
             if (!want) userPauseAt = now(); // 自己按的暂停：不等宽限
@@ -532,6 +657,17 @@ final class MediaState {
             main.postDelayed(pressedTimer, 4000);
             playing = want;
             emit();
+        }
+        if (Player.PKG.equals(pkg) && Player.control(ctx, toggle ? (playing ? 1 : 2) : "next".equals(cmd) ? 4 : 3)) {
+            if (toggle) { main.removeCallbacks(pressedTimer); main.postDelayed(pressedTimer, 10000); } // 蓝牙音乐的播放状态要过五六秒才报过来
+            if (toggle && !playing && lyKey != null) { holdPause = false; anchor(pos()); holdPause = true; holdAt = now(); } // 停在现在的位置
+            else holdPause = false;
+            if (toggle && !playing) {
+                repause = () -> { repause = null; if (!playing && media != null && media.optBoolean("playing")) Player.control(ctx, 2); };
+                main.postDelayed(repause, 1000);
+            }
+            emit();
+            return;
         }
         host.request(m, null, (r, code, msg) -> {
             if (code != null && toggle) { pressed = null; main.removeCallbacks(pressedTimer); playing = effPlaying(); emit(); } // 失败：变回去

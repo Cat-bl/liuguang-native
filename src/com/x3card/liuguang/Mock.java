@@ -168,7 +168,7 @@ final class Mock {
         main.post(() -> { if (byd != null) { byd.onList(songs, cur); meta(); } });
     }
 
-    private void meta() { if (byd != null) byd.onMetadata(song().title, song().id, fav.get(song().id)); }
+    private void meta() { if (byd != null) byd.onMetadata(song().title, song().id, fav.get(song().id), null, song().artist, song().dur); }
 
     // ================= 「多媒体」那几样（Player 转过来） =================
     void playIndex(int i) { if (i >= 0 && i < songs.size()) track(i, 600); }

@@ -452,7 +452,7 @@ final class Shelf {
         b.back = 1;
     }
 
-    /** 普通砖：图集里那一格（没取到是空玻璃，取到了淡进来）+ 有大图就叠上大图；正在放的那首用场景的封面（歌名对得上时） */
+    /** 普通砖：图集里那一格（还在取是空玻璃，取到了淡进来；没封面的是按歌名生成的）+ 有大图就叠上大图；正在放的那首用场景的封面（歌名对得上时） */
     private void texPlain(Brick b, float time) {
         BydMedia.Song s = songs.get(b.i);
         Hi hi = hiOf.get(b.i);
@@ -463,13 +463,13 @@ final class Shelf {
             b.art = 1; b.back = 1; b.hiK = 0; b.slot = -1;
             return;
         }
-        Integer sl = slotOf.get(s.cover);
+        Integer sl = slotOf.get(s.art);
         b.slot = sl == null ? -1 : sl;
         if (b.slot >= 0) { slotUsed[b.slot] = frame; slotRect(b.slot, b.rF); b.art = clamp((time - slotAt[b.slot]) / 0.28f, 0, 1); }
         else { System.arraycopy(FULL, 0, b.rF, 0, 4); b.art = 0; }
         b.tF = atlas; b.tB = atlas;
         System.arraycopy(b.rF, 0, b.rB, 0, 4);
-        if (hi != null && hi.url.equals(s.cover)) {
+        if (hi != null && hi.url.equals(s.art)) {
             b.tF2 = sc.tex(hi.b);
             System.arraycopy(FULL, 0, b.rF2, 0, 4);
             b.hiK = clamp((time - hi.at) / 0.3f, 0, 1);
@@ -486,16 +486,17 @@ final class Shelf {
     private final float[] slotAt = new float[SLOTS];
     private final Map<String, Integer> slotOf = new HashMap<>();
     private final java.util.Set<String> asked = new java.util.HashSet<>();
+    private final java.util.Set<String> fake = new java.util.HashSet<>(); // 格子里是先顶上的生成封面（网上的没取到，过一会儿再取）
     private volatile boolean alive;
     private int gen;
 
-    private static final class Got { final int gen; final String url; final boolean big; final Bitmap[] mips; final Palette pal; Got(int g, String u, boolean b, Bitmap[] m, Palette p) { gen = g; url = u; big = b; mips = m; pal = p; } }
+    private static final class Got { final int gen; final String url; final boolean big, fake; final Bitmap[] mips; final Palette pal; Got(int g, String u, boolean b, Bitmap[] m, Palette p, boolean f) { gen = g; url = u; big = b; mips = m; pal = p; fake = f; } }
     private final ConcurrentLinkedQueue<Got> got = new ConcurrentLinkedQueue<>();
 
     private final SongCovers.Sink sink = new SongCovers.Sink() {
-        @Override public void got(String url, boolean big, Bitmap[] mips, Palette pal) {
+        @Override public void got(String url, boolean big, Bitmap[] mips, Palette pal, boolean fake) {
             if (!alive) { recycle(mips); return; } // 歌单已经关了
-            Shelf.this.got.add(new Got(gen, url, big, mips, pal));
+            Shelf.this.got.add(new Got(gen, url, big, mips, pal, fake));
             sc.wake();
         }
     };
@@ -552,6 +553,7 @@ final class Shelf {
         java.util.Arrays.fill(slotUsed, 0);
         slotOf.clear();
         asked.clear();
+        fake.clear();
     }
 
     /** 取到的封面传上去：每帧最多 3 格（一格四级约 170KB），大图收进来（画的时候场景按需传） */
@@ -571,14 +573,17 @@ final class Shelf {
                 continue;
             }
             asked.remove(x.url);
-            if (x.mips == null || slotOf.containsKey(x.url)) { recycle(x.mips); continue; }
-            int s = freeSlot();
+            Integer had = slotOf.get(x.url);
+            if (x.mips == null || (had != null && (!fake.contains(x.url) || x.fake))) { recycle(x.mips); continue; }
+            int s = had != null ? had : freeSlot(); // 先顶上的生成封面换成取到的：同一格，不再淡进来
             if (s < 0) { recycle(x.mips); continue; }
             G.bindTex(0, atlas);
             int px = (s % COLS) * TS, py = (s / COLS) * TS;
             for (int l = 0; l < x.mips.length; l++) GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, l, px >> l, py >> l, x.mips[l]);
             recycle(x.mips);
-            slotUrl[s] = x.url; slotOf.put(x.url, s); slotAt[s] = time; slotUsed[s] = frame;
+            if (x.fake) fake.add(x.url); else fake.remove(x.url);
+            if (had == null) { slotUrl[s] = x.url; slotOf.put(x.url, s); slotAt[s] = time; }
+            slotUsed[s] = frame;
             up++;
         }
     }
@@ -586,7 +591,7 @@ final class Shelf {
     /** 这张封面是哪首的（先找中间附近的） */
     private int indexOf(String url) {
         int f = Math.max(0, focusSong());
-        for (int k = 0; k < n; k++) { int i = (f + (k % 2 == 0 ? k / 2 : -(k / 2 + 1)) + n * 4) % n; if (url.equals(songs.get(i).cover)) return i; }
+        for (int k = 0; k < n; k++) { int i = (f + (k % 2 == 0 ? k / 2 : -(k / 2 + 1)) + n * 4) % n; if (url.equals(songs.get(i).art)) return i; }
         return -1;
     }
 
@@ -597,7 +602,7 @@ final class Shelf {
             if (slotUrl[s] == null) return s;
             if (slotUsed[s] < frame - 1 && slotUsed[s] < old) { old = slotUsed[s]; best = s; }
         }
-        if (best >= 0) { slotOf.remove(slotUrl[best]); slotUrl[best] = null; }
+        if (best >= 0) { slotOf.remove(slotUrl[best]); fake.remove(slotUrl[best]); slotUrl[best] = null; }
         return best;
     }
 
@@ -610,9 +615,10 @@ final class Shelf {
             for (int sg = 0; sg < (k == 0 ? 1 : 2); sg++) {
                 int v = f + (sg == 0 ? k : -k);
                 if (v < 0 || v >= vn) continue;
-                String u = songs.get(vi(v)).cover;
-                if (u.isEmpty() || slotOf.containsKey(u) || asked.contains(u)) continue;
-                if (a.load(u, false, sink)) asked.add(u);
+                BydMedia.Song s = songs.get(vi(v));
+                String u = s.art;
+                if (asked.contains(u) || (slotOf.containsKey(u) && !fake.contains(u))) continue;
+                if (a.load(s, false, sink)) asked.add(u);
                 if (asked.size() >= 4) return;
             }
         }
@@ -647,8 +653,8 @@ final class Shelf {
         boolean isPlaying = f == playing && sc.coverTitle.equals(songs.get(f).title);
         if (isPlaying) { preview(-1); return; }
         Hi h = hiOf.get(f);
-        String u = songs.get(f).cover;
-        if (h == null || !h.url.equals(u)) { SongCovers a = art; if (a != null && !u.isEmpty()) a.load(u, true, sink); return; }
+        String u = songs.get(f).art;
+        if (h == null || !h.url.equals(u)) { SongCovers a = art; if (a != null) a.load(songs.get(f), true, sink); return; }
         if (previewIdx != f) { previewIdx = f; sc.shelfPreview(h.b, h.pal); }
     }
 

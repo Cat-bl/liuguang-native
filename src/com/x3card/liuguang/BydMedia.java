@@ -47,11 +47,14 @@ final class BydMedia {
     /** 红心：不显示（不知道这首收没收藏、不是「多媒体」在放）/ 没收藏 / 收藏了 */
     static final int HIDE = -1, OFF = 0, ON = 1;
 
-    /** 歌单里的一首（cover：封面图的网址，可能是空的） */
+    /** 歌单里的一首（cover：封面图的地址，可能是空的；art：歌单长廊认封面用的，没封面地址的按歌名歌手认） */
     static final class Song {
-        final String id, title, artist, cover;
+        final String id, title, artist, cover, art;
         final long dur;
-        Song(String id, String title, String artist, String cover, long dur) { this.id = id; this.title = title; this.artist = artist; this.cover = cover; this.dur = dur; }
+        Song(String id, String title, String artist, String cover, long dur) {
+            this.id = id; this.title = title; this.artist = artist; this.cover = cover; this.dur = dur;
+            art = cover.isEmpty() ? "gen:" + title + "|" + artist : cover;
+        }
     }
 
     private static final String PKG = "com.byd.mediacontroller";
@@ -68,7 +71,8 @@ final class BydMedia {
     private final Sink sink = new Sink(this);
     private boolean on, bound;
     private IBinder remote;
-    private String mdTitle, mdId;
+    private String mdTitle, mdId, mdArt, mdArtist;
+    private long mdDur;
     private Boolean mdHeart, pending; // mdHeart：这首收没收藏（null：没给心形评分）；pending：刚点了、等「多媒体」改过来
     private String pendingTitle;
     private List<Song> songs = Collections.emptyList();
@@ -154,6 +158,7 @@ final class BydMedia {
     private void drop() {
         mdTitle = null;
         mdId = null;
+        mdArt = null;
         mdHeart = null;
         pending = null;
         main.removeCallbacks(pendingOff);
@@ -163,10 +168,13 @@ final class BydMedia {
     }
 
     /** 当前这首（在主线程里） */
-    void onMetadata(String title, String id, Boolean heart) {
+    void onMetadata(String title, String id, Boolean heart, String art, String artist, long dur) {
         if (!on) return;
         mdTitle = title;
         mdId = id;
+        mdArt = art;
+        mdArtist = artist;
+        mdDur = dur;
         mdHeart = heart;
         if (pending != null && (pending.equals(mdHeart) || !java.util.Objects.equals(mdTitle, pendingTitle))) { // 改过来了、或者换了歌
             pending = null;
@@ -211,6 +219,11 @@ final class BydMedia {
     List<Song> songs() { return songs; }
 
     /** 正在放的是第几首（-1：不知道） */
+    /** 当前这首的本地封面文件（蓝牙音乐：手机传过来的图），连同它是哪首的（歌手栏、时长），没有是 null */
+    String artPath() { return mdArt; }
+    String artArtist() { return mdArtist; }
+    long artDur() { return mdDur; }
+
     int current() {
         if (mdId != null) for (int i = 0; i < songs.size(); i++) if (mdId.equals(songs.get(i).id)) return i;
         return playingIdx;
@@ -236,20 +249,26 @@ final class BydMedia {
             try {
                 data.enforceInterface(LISTENER);
                 Bundle b = data.readInt() != 0 ? data.readBundle(Sink.class.getClassLoader()) : null;
-                String title = null, id = null;
+                String title = null, id = null, art = null, artist = null;
                 Boolean heart = null;
+                long dur = 0;
                 if (b != null) {
                     title = clean(b.getString("android.media.metadata.TITLE"));
                     if (title.isEmpty()) title = clean(b.getString("android.media.metadata.DISPLAY_TITLE"));
                     id = b.getString("android.media.metadata.MEDIA_ID");
                     Object r = b.get("android.media.metadata.USER_RATING");
                     if (r instanceof Rating && ((Rating) r).getRatingStyle() == Rating.RATING_HEART) heart = ((Rating) r).hasHeart();
-                    Object art = b.get("android.media.metadata.ALBUM_ART"); // 封面走宿主，这张用不着：马上还掉
-                    if (art instanceof Bitmap) ((Bitmap) art).recycle();
+                    Object bm = b.get("android.media.metadata.ALBUM_ART"); // 封面走宿主，这张用不着：马上还掉
+                    if (bm instanceof Bitmap) ((Bitmap) bm).recycle();
+                    String u = b.getString("android.media.metadata.ALBUM_ART_URI");
+                    if (u != null && u.startsWith("/")) art = u; // 本地文件（蓝牙音乐）；网上的、content:// 的宿主会给
+                    artist = clean(b.getString("android.media.metadata.ARTIST"));
+                    dur = b.getLong("android.media.metadata.DURATION");
                 }
-                final String t = title, i = id;
+                final String t = title, i = id, a = art, ar = artist;
                 final Boolean h = heart;
-                m.main.post(() -> m.onMetadata(t, i, h));
+                final long d = dur;
+                m.main.post(() -> m.onMetadata(t, i, h, a, ar, d));
             } catch (Exception e) {
                 Log.w(Uiplus.TAG, "车机媒体控制器的 metadata 读不出来", e);
             }

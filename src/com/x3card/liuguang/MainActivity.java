@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.os.Bundle;
 import android.os.Handler;
@@ -80,7 +81,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         song = new MediaState(host, ioH, this::changed);
         covers = new SongCovers(this);
         bydMedia = new BydMedia(this, main, new BydMedia.Listener() {
-            @Override public void changed() { pushSnap(); pushSongs(); }
+            @Override public void changed() { pushSnap(); pushSongs(); localArt(); }
             @Override public void heartFailed() { ui.toast("没收藏上，过一会儿再试"); }
         });
         mock = Mock.open(this);
@@ -144,6 +145,23 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         host.quit();
         io.quitSafely();
         super.onDestroy();
+    }
+
+    /** 车机媒体控制器给的本地封面文件（蓝牙音乐）交给 song；读不了（没有读存储的权限）就问车主一次（一个进程里只问一次） */
+    private static boolean askedStorage;
+    private static final int REQ_STORAGE = 7;
+
+    private void localArt() {
+        String p = bydMedia.artPath();
+        song.artFile(p, bydMedia.artArtist(), bydMedia.artDur());
+        if (p == null || askedStorage || checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) return;
+        askedStorage = true;
+        requestPermissions(new String[] { android.Manifest.permission.READ_EXTERNAL_STORAGE }, REQ_STORAGE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        if (code == REQ_STORAGE && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) song.recheckCover();
     }
 
     @Override
@@ -490,8 +508,8 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     public void press(final String cmd) {
         main.post(() -> {
             if ("heart".equals(cmd)) { heart(); return; } // 收藏不经过宿主
-            if (!host.canExec()) { ui.toast("要先在宿主里允许「执行操作」"); authorize(); return; }
-            song.press(cmd, (r, code, msg) -> {
+            if (!Player.PKG.equals(song.pkg) && !host.canExec()) { ui.toast("要先在宿主里允许「执行操作」"); authorize(); return; }
+            song.press(cmd, this, (r, code, msg) -> {
                 if (code == null) return;
                 ui.toast("PERMISSION_DENIED".equals(code) ? "没有执行操作的授权：到宿主的「应用授权」里给琉光打开"
                     : "UNSUPPORTED".equals(code) ? "这台车机还不支持" + SAY.get(cmd)

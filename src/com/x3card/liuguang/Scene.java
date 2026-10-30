@@ -64,7 +64,7 @@ final class Scene implements GLSurfaceView.Renderer {
     private volatile MediaState.Snap MS = new MediaState.Snap();
     private boolean dayWanted = false, ready = false;
 
-    void setSnap(MediaState.Snap s) { MS = s; wake(); }
+    void setSnap(MediaState.Snap s) { boolean same = s.same(MS); MS = s; if (!same) wake(); } // 什么都没变不醒：停着时醒来画一帧，按时间走的极光、摆动会跳一下
     void setDay(boolean d) { dayWanted = d; DAY.t = d ? 1 : 0; wake(); }
     /** 车机「多媒体」的播放队列和正在放的是第几首（BydMedia） */
     void setSongs(List<BydMedia.Song> s, int cur) { shelf.setSongs(s, cur); wake(); }
@@ -894,6 +894,7 @@ final class Scene implements GLSurfaceView.Renderer {
         Iterator<Map.Entry<Integer, LineObj>> it = LY.objs.entrySet().iterator();
         while (it.hasNext()) { Map.Entry<Integer, LineObj> e = it.next(); if (!want.contains(e.getKey())) { dropObj(e.getValue()); it.remove(); } }
         float stiff = LY.drag ? 420 : 130, damp = LY.drag ? 42 : 19;
+        boolean single = !MS.full; // 没有整首歌词（只有听到过的句子）：只显示正在唱的这句，翻着看时才露出前面的
         for (int i : want) {
             LineObj o = LY.objs.get(i);
             if (o == null) o = makeObj(i, time, time < LY.enterAt + 0.6f);
@@ -902,7 +903,7 @@ final class Scene implements GLSurfaceView.Renderer {
             o.y.t = o.ty; o.y.k = stiff; o.y.c = damp;
             float introK = introLines(i - LY.shown), th = onWheel(o, o.y.x);
             o.act.t = isCur ? 1 : 0;
-            o.alpha.t = time < o.at && o.alpha.x == 0 ? 0 : (isCur ? 1 : (i == seekSel ? 0.95f : browsing ? 0.7f : 0.46f) * (1 - day * 0.3f));
+            o.alpha.t = time < o.at && o.alpha.x == 0 ? 0 : (isCur ? 1 : (i == seekSel ? 0.95f : browsing ? 0.7f : single ? 0 : 0.46f) * (1 - day * 0.3f));
             o.blur.t = time < o.at && o.blur.x == 1 ? 1 : (isCur || browsing ? 0 : Math.min(0.9f, 0.12f + th * 0.85f));
             if (o.y.step(dt)) moving = true;
             if (o.alpha.step(dt)) moving = true;

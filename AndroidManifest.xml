@@ -2,13 +2,15 @@
 <!-- 琉光（原生版）：车机 Android 10，宿主（com.wzw.bydmodule）的多窗口 / 悬浮窗口把应用嵌进窗口里显示，所以要能随窗口改大小、不重建 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.x3card.liuguang"
-    android:versionCode="5"
-    android:versionName="0.5">
+    android:versionCode="6"
+    android:versionName="0.6">
 
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="29" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <!-- 歌单里每首的封面是网上的图（QQ 音乐的 CDN）：普通权限，装上就有 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 蓝牙音乐的封面：手机传过来、车机存在 /storage/emulated/0/bluetooth/ 下的图，要读存储（第一次用到时问车主；安卓 10 读别的应用写的文件要 requestLegacyExternalStorage） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <queries>
         <package android:name="com.wzw.bydmodule" />
     </queries>
@@ -19,6 +21,7 @@
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:resizeableActivity="true"
+        android:requestLegacyExternalStorage="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
         <activity
             android:name=".MainActivity"
