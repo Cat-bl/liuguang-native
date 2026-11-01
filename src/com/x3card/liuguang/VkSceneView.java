@@ -12,7 +12,7 @@ import java.util.ArrayList;
 
 /**
  * 画 3D 场景的 Vulkan 画布（见 Vk）：用法同 SceneView（GLSurfaceView 的那几个方法），自己开一个画画线程。
- * 画布按密度 1.5 画、系统拉伸到窗口大小（同 SceneView）；抗锯齿是 4 倍多重采样，建画布时定。
+ * 画布按密度 1.5 画、显卡跟不上时再按 res 缩、系统拉伸到窗口大小（同 SceneView）；抗锯齿是 4 倍多重采样，建画布时定。
  * 原生那边的设备、贴图这些一直留着（同 GL 的 setPreserveEGLContextOnPause），画布没了只拆交换链，再有了重建交换链。
  */
 final class VkSceneView extends SurfaceView implements SurfaceHolder.Callback, Canvas3D {
@@ -108,12 +108,12 @@ final class VkSceneView extends SurfaceView implements SurfaceHolder.Callback, C
                 } else hasSurface = vk.surface(mk);
                 continue;
             }
-            if (resize) { vk.resize(false); scene.onSurfaceChanged(null, sw, sh); continue; }
+            if (resize) { vk.resize(false, sw, sh); scene.onSurfaceChanged(null, sw, sh); continue; }
             if (draw) {
                 vk.begin();
                 scene.onDrawFrame(null);
                 int r = vk.end();
-                if (r == 1) { vk.resize(true); requestRender(); }
+                if (r == 1) { vk.resize(true, sw, sh); requestRender(); }
             }
         }
         if (vk != null) { vk.destroy(); G.useVk(null); }
@@ -122,9 +122,20 @@ final class VkSceneView extends SurfaceView implements SurfaceHolder.Callback, C
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
-        float k = Math.min(dens, 1.5f) / dens;
-        final int fw = Math.max(1, Math.round(w * k)), fh = Math.max(1, Math.round(h * k));
-        post(() -> getHolder().setFixedSize(fw, fh)); // 同 SceneView
+        cssW = w / dens; cssH = h / dens;
+        res = Res.recall(getContext(), Math.round(cssW) + "x" + Math.round(cssH));
+        post(this::fit); // 同 SceneView
+    }
+
+    private volatile float cssW, cssH, res = 1;
+    @Override public float cssW() { return cssW; }
+    @Override public float cssH() { return cssH; }
+    @Override public float res() { return res; }
+    @Override public void setRes(float k) { post(() -> { res = k; fit(); }); }
+
+    private void fit() {
+        float k = Math.min(dens, 1.5f) / dens * res;
+        if (getWidth() > 0) getHolder().setFixedSize(Math.max(1, Math.round(getWidth() * k)), Math.max(1, Math.round(getHeight() * k)));
     }
 
     @Override

@@ -91,7 +91,7 @@ node build.mjs --install  # 打完用 adb install -r 装上（adb 要在 PATH �
 | `Scene.java` | 3D 场景、着色器、手势、出帧 |
 | `Rain.java` / `RainPick.java` / `BydWeather.java` | 雨珠、要不要下、读车机天气 |
 | `G.java` / `Txt.java` / `Palette.java` / `Spring.java` | 画图的工具（程序、网格、贴图、离屏缓冲，GL 和 Vulkan 共用一套调用）、歌词贴图和折行、封面取色、弹簧动画 |
-| `Vk.java` / `VkSceneView.java` / `Canvas3D.java` | Vulkan 后端：把每帧的绘制记下来一次交给原生代码；Vulkan 的画布；两种画布共用的接口 |
+| `Vk.java` / `VkSceneView.java` / `Canvas3D.java` / `Res.java` | Vulkan 后端：把每帧的绘制记下来一次交给原生代码；Vulkan 的画布；两种画布共用的接口；显卡跟不上时画布缩多少（按窗口大小记住） |
 | `Ui.java` / `Settings.java` / `InfoView.java` / `FullActivity.java` | 设置面板、设置存取、连不上宿主或没授权时的说明、全屏页 |
 | `Guide.java` | 新手引导（第一次打开时说明封面能点也能划） |
 

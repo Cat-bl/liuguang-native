@@ -9,7 +9,7 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.egl.EGLDisplay;
 
 /**
- * 画 3D 场景的画布：OpenGL ES 3.0、带深度缓冲；画布按密度 1.5 画（同网页版的像素比上限，车机密度 2 时少画四成多的像素），系统拉伸到窗口大小。
+ * 画 3D 场景的画布：OpenGL ES 3.0、带深度缓冲；画布按密度 1.5 画（同网页版的像素比上限，车机密度 2 时少画四成多的像素），显卡跟不上时再按 res 缩（Scene 定），系统拉伸到窗口大小。
  * 抗锯齿（设置里开）是画布的 4 倍多重采样，只能在建画布时定：改了设置就换一块新画布（MainActivity.rebuild）；显卡不支持就不开。
  * 停着不动不出帧（场景要画才 requestRender）。手势交给场景（在 GL 线程里处理）
  */
@@ -69,12 +69,23 @@ public class SceneView extends GLSurfaceView implements Canvas3D {
         }
     }
 
+    private volatile float cssW, cssH, res = 1;
+    @Override public float cssW() { return cssW; }
+    @Override public float cssH() { return cssH; }
+    @Override public float res() { return res; }
+    @Override public void setRes(float k) { post(() -> { res = k; fit(); }); }
+
+    private void fit() {
+        float k = Math.min(dens, 1.5f) / dens * res;
+        if (getWidth() > 0) getHolder().setFixedSize(Math.max(1, Math.round(getWidth() * k)), Math.max(1, Math.round(getHeight() * k)));
+    }
+
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
-        float k = Math.min(dens, 1.5f) / dens;
-        final int fw = Math.max(1, Math.round(w * k)), fh = Math.max(1, Math.round(h * k));
-        post(() -> getHolder().setFixedSize(fw, fh)); // 在布局过程中直接设有时不生效：放到下一轮
+        cssW = w / dens; cssH = h / dens;
+        res = Res.recall(getContext(), Math.round(cssW) + "x" + Math.round(cssH));
+        post(this::fit); // 在布局过程中直接设有时不生效：放到下一轮
     }
 
     @Override

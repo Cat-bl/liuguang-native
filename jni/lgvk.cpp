@@ -66,6 +66,7 @@ struct Ctx {
     // 交换链
     VkSwapchainKHR sc = VK_NULL_HANDLE;
     VkExtent2D ext{0, 0}, view{0, 0};
+    VkExtent2D want{0, 0}; // 画布要多大（SurfaceView 交来的尺寸）：刚 setFixedSize 时系统报的窗口大小可能还是旧的，按这个建
     VkSurfaceTransformFlagBitsKHR pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     float rot[4] = {1, 0, 0, -1}; // 画到屏幕上的 2×2 矩阵（先上下翻，再按预旋转转）
     std::vector<VkImage> scImgs;
@@ -513,12 +514,14 @@ void swapFree(Ctx& c) {
 bool swapMake(Ctx& c) {
     VkSurfaceCapabilitiesKHR caps;
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c.gpu, c.surf, &caps) != VK_SUCCESS) return false;
-    c.view = caps.currentExtent;
+    c.view = c.want.width ? c.want : caps.currentExtent;
     if (c.view.width == 0xFFFFFFFF) c.view = {(uint32_t) ANativeWindow_getWidth(c.win), (uint32_t) ANativeWindow_getHeight(c.win)};
     if (c.view.width == 0 || c.view.height == 0) return false;
     c.pre = caps.currentTransform;
     bool side = c.pre & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR);
     c.ext = side ? VkExtent2D{c.view.height, c.view.width} : c.view;
+    c.ext.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, c.ext.width));
+    c.ext.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, c.ext.height));
     int deg = c.pre == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ? 90 : c.pre == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR ? 180 : c.pre == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR ? 270 : 0;
     float co = std::round(std::cos(deg * 3.14159265f / 180)), si = std::round(std::sin(deg * 3.14159265f / 180));
     // 先上下翻（屏幕的图第一行在上面，GL 的在下面），再转：[co -si; si co] × [1 0; 0 -1]
@@ -574,7 +577,8 @@ bool swapMake(Ctx& c) {
 bool swapChanged(Ctx& c) {
     VkSurfaceCapabilitiesKHR caps;
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c.gpu, c.surf, &caps) != VK_SUCCESS) return false;
-    return caps.currentTransform != c.pre || (caps.currentExtent.width != 0xFFFFFFFF && (caps.currentExtent.width != c.view.width || caps.currentExtent.height != c.view.height));
+    VkExtent2D v = c.want.width ? c.want : caps.currentExtent;
+    return caps.currentTransform != c.pre || (v.width != 0xFFFFFFFF && (v.width != c.view.width || v.height != c.view.height));
 }
 
 bool surfMake(Ctx& c, JNIEnv* env, jobject surface) {
@@ -1015,8 +1019,9 @@ JF(jboolean, nSurface)(JNIEnv* env, jclass, jlong p, jobject surface) {
 
 JF(void, nSurfaceLost)(JNIEnv*, jclass, jlong p) { surfFree(*ctx(p)); }
 
-JF(jboolean, nResize)(JNIEnv*, jclass, jlong p, jboolean force) {
+JF(jboolean, nResize)(JNIEnv*, jclass, jlong p, jboolean force, jint w, jint h) {
     Ctx* c = ctx(p);
+    if (w > 0 && h > 0) c->want = {(uint32_t) w, (uint32_t) h};
     if (!c->surf) return JNI_FALSE;
     if (!force && c->sc && !swapChanged(*c)) return JNI_TRUE;
     vkDeviceWaitIdle(c->dev);

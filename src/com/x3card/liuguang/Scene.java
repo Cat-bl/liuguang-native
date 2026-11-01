@@ -43,7 +43,7 @@ final class Scene implements GLSurfaceView.Renderer {
     final boolean vkView; // Vulkan 画布
     final Host host;
     private final float dens;
-    final float DPR;
+    float DPR; // 画布像素 / CSS 像素：画布缩小时跟着变，场景按 CSS 像素算的大小不变
 
     Scene(Canvas3D view, Host host, float density) {
         this.view = view;
@@ -501,8 +501,15 @@ final class Scene implements GLSurfaceView.Renderer {
     public void onSurfaceChanged(GL10 gl, int width, int height) {
         bw = Math.max(1, width);
         bh = Math.max(1, height);
+        if (view.cssW() > 0) DPR = bw / view.cssW();
+        resHold = SystemClock.uptimeMillis() + (resJust ? 1500 : 4000); // 刚换画布（开场、拖分屏、换倍数）：先不量
+        resJust = false;
+        android.view.Display d = view.view().getDisplay();
+        if (d != null && d.getRefreshRate() > 20) hz = d.getRefreshRate();
+        float w0 = W, h0 = H;
         W = bw / DPR;
         H = bh / DPR;
+        boolean same = Math.abs(W - w0) < 0.5f && Math.abs(H - h0) < 0.5f; // 只是画布缩放变了：歌词、歌名的贴图按 CSS 像素画的，不用重画
         Matrix.perspectiveM(P, 0, FOV, W / H, 0.5f, 90);
         wpp = 2 * D * (float) Math.tan(FOV * Math.PI / 360) / H;
         dpx = D / wpp;
@@ -510,7 +517,7 @@ final class Scene implements GLSurfaceView.Renderer {
         waterFbo.size(Math.max(8, (int) Math.ceil(bw / 2f)), Math.max(8, (int) Math.ceil(bh / 2f)));
         rain.size(W, H, bw, bh, DPR);
         layout();
-        if (ready) { measureSong(); lyricsSong(clock, false); titleSong(false); }
+        if (ready && !same) { measureSong(); lyricsSong(clock, false); titleSong(false); }
         wake();
     }
 
@@ -1518,6 +1525,44 @@ final class Scene implements GLSurfaceView.Renderer {
     private float gapAvg = 16.7f;
     private long retryAt, retryGap = 20000;
 
+    // ================= 画面缩小：显卡跟不上时画布每边少画一些（系统拉伸到窗口大小），性能好的车一直按原尺寸画 =================
+    // 连着出帧时每 3 秒算一次帧率：连着两次低于刷新率（最多按 60）的九成就缩一档；画一帧处理器就要用掉一帧时间的六成时是卡在处理器上，缩画面没用，不缩。
+    // 跑满了隔一阵试着放大一档，又跟不上就缩回去，下次隔得更久（30 秒起，最长 8 分钟）。最多缩到车机 3 分屏格子那么多像素、每边不少于 0.6 倍。定下来的按窗口大小记住（Res）
+    private static final float[] STEPS = { 1, 0.85f, 0.7f, 0.6f };
+    private static final float MIN_PX = 617 * 969;
+    private String resKey = "";
+    private long resT0, resC0, resHold, resAt, resGap = 30000;
+    private int resN, resSlow;
+    private float resPrev, hz = 60;
+    private boolean resTrial, resCpu, resJust;
+
+    private float resFloor() { float c = Math.min(dens, 1.5f); return Math.max(0.6f, (float) Math.sqrt(MIN_PX / Math.max(1, view.cssW() * view.cssH() * c * c))); }
+    private float resDown(float k) { float lo = resFloor(); for (float s : STEPS) if (s < k - 0.01f) { s = Math.max(s, lo); return s < k - 0.01f ? s : k; } return k; }
+    private float resUp(float k) { float r = k; for (float s : STEPS) if (s > k + 0.01f) r = s; return r; }
+    /** 不能再缩了（帧率"自动"这时才降到 30） */
+    private boolean resLow() { float k = view.res(); return resDown(k) >= k || resCpu; }
+
+    private void resTick(long t, boolean count) {
+        String key = Math.round(view.cssW()) + "x" + Math.round(view.cssH());
+        if (!key.equals(resKey)) { resKey = key; resTrial = resCpu = false; resGap = 30000; resAt = t; }
+        if (!count || t < resHold) { resN = 0; if (t < resHold) resSlow = 0; return; }
+        if (resN++ == 0) { resT0 = t; resC0 = SystemClock.currentThreadTimeMillis(); return; }
+        if (t - resT0 < 3000) return;
+        float n = resN - 1, f = n * 1000f / (t - resT0), k = view.res(), to = k, target = Math.min(60, hz);
+        resCpu = (SystemClock.currentThreadTimeMillis() - resC0) / n > 600 / target;
+        resN = 0;
+        resSlow = f < target * 0.9f ? resSlow + 1 : 0;
+        if (resTrial) { resTrial = false; if (resSlow > 0) { to = resPrev; resGap = Math.min(480000, resGap * 2); } else resGap = 30000; }
+        else if (resSlow >= 2 && !resCpu) to = resDown(k);
+        else if (f > target * 0.96f && k < 1 && t - resAt > resGap) { to = resUp(k); resPrev = k; resTrial = true; }
+        if (!resTrial) Res.remember(view.view().getContext(), key, to);
+        if (to == k) return;
+        view.setRes(to);
+        resAt = t;
+        resJust = true;
+        android.util.Log.w(Uiplus.TAG, "画面：" + key + " 每边 " + Math.round(k * 100) / 100f + " → " + Math.round(to * 100) / 100f + " 倍（" + Math.round(f * 10) / 10f + " 帧）");
+    }
+
     // sceneDirty：外面交进来的（媒体、深浅色、设置、手势……）都要重画场景；雨珠自己的定时器叫醒（rainWake）不用
     private volatile boolean sceneDirty = true;
     private boolean rainOnly;
@@ -1559,10 +1604,11 @@ final class Scene implements GLSurfaceView.Renderer {
         if (fpsReset) { fpsReset = false; fps = "30".equals(fpsMode) ? 30 : 60; gapAvg = 16.7f; retryGap = 20000; retryAt = t + retryGap; }
         if (lastT != 0 && "auto".equals(fpsMode) && !rainOnly) {
             gapAvg = gapAvg * 0.95f + (t - lastT) * 0.05f;
-            if (fps == 60 && gapAvg > 24) { fps = 30; retryAt = t + retryGap; retryGap = Math.min(300000, retryGap * 2); }
+            if (fps == 60 && gapAvg > 24 && resLow()) { fps = 30; retryAt = t + retryGap; retryGap = Math.min(300000, retryGap * 2); } // 画面还能缩就先缩
             else if (fps == 30 && t > retryAt) { fps = 60; gapAvg = 16.7f; }
             else if (fps == 60 && t > retryAt + 20000) retryGap = 20000; // 60 帧稳住了：下次降了从头算
         }
+        resTick(t, lastT != 0 && fps == 60 && !rainOnly && ready);
         lastT = t;
         clock = (t - t0) / 1000f;
         G.screen(bw, bh);

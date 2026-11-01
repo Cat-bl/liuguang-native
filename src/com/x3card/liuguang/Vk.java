@@ -31,7 +31,7 @@ final class Vk {
     private static native int[] nInfo(long c);
     private static native boolean nSurface(long c, Surface s);
     private static native void nSurfaceLost(long c);
-    private static native boolean nResize(long c, boolean force);
+    private static native boolean nResize(long c, boolean force, int w, int h);
     private static native int nProg(long c, String vs, String fs);
     private static native int nMesh(long c, float[] data, int[] sizes, short[] index);
     private static native void nMeshData(long c, int id, float[] data);
@@ -110,7 +110,8 @@ final class Vk {
 
     boolean surface(Surface s) { return nSurface(c, s); }
     void surfaceLost() { nSurfaceLost(c); }
-    boolean resize(boolean force) { return nResize(c, force); }
+    /** w × h：画布要的大小（SurfaceView 交来的） */
+    boolean resize(boolean force, int w, int h) { return nResize(c, force, w, h); }
     void destroy() { nDestroy(c); }
 
     // ---------------- 资源 ----------------

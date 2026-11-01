@@ -329,7 +329,7 @@ final class Rain {
         for (Drop d : drops) { d.x *= kx; d.y *= ky; d.lx *= kx; d.ly *= ky; d.r *= ky; d.rT *= ky; d.trailAt *= ky; }
         W = w; H = h; dpr = dpr0;
         if (shot().fb != 0) shot().size(bw0, bh0);
-        if (mistFb.fb != 0) { mistFb.free(); waterFb.free(); fresh = true; }
+        if (mistFb.fb != 0 && (Math.abs(kx - 1) > 0.001f || Math.abs(ky - 1) > 0.001f)) { mistFb.free(); waterFb.free(); fresh = true; } // 只是画布缩放变了：雾珠图、水图按 CSS 像素，留着
         valid = false;
     }
 

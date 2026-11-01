@@ -12,4 +12,11 @@ interface Canvas3D {
     void requestRender();
     /** 放到画画线程里做 */
     void queueEvent(Runnable r);
+    /** 窗口大小（CSS 像素，还没量出来是 0） */
+    float cssW();
+    float cssH();
+    /** 画布每边按多少倍画（见 Res） */
+    float res();
+    /** 改倍数：画布换成新尺寸（哪个线程都能叫） */
+    void setRes(float k);
 }
