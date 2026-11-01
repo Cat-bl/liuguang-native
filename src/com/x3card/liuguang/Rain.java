@@ -246,7 +246,7 @@ final class Rain {
             int[] b = new int[1];
             GLES30.glGenVertexArrays(1, b, 0);
             vao = b[0];
-            GLES30.glBindVertexArray(vao);
+            G.bindVao(vao);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, corners);
             GLES30.glEnableVertexAttribArray(0);
             GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 8, 0);
@@ -259,41 +259,48 @@ final class Rain {
                 GLES30.glVertexAttribPointer(i, 4, GLES30.GL_FLOAT, false, 32, (i - 1) * 16);
                 GLES30.glVertexAttribDivisor(i, 1);
             }
-            GLES30.glBindVertexArray(0);
+            G.bindVao(0);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
         }
 
-        /** 画进 fbo（水珠、水痕按预乘"盖上去"，擦的是按浓淡挖掉） */
+        /** 画进 fbo（水珠、水痕按预乘"盖上去"，擦的是按浓淡挖掉）；Vulkan 时每实例数据跟着这一帧的命令走，四个角是 rain.cm */
         void flush(G.Fbo fbo) {
             if (n == 0) return;
-            if (vao == 0 || fbo.fb == 0) { n = 0; return; }
-            fb.position(0);
-            fb.put(buf, 0, n * 8).position(0);
-            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo);
-            GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, n * 8 * 4, fb);
-            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
+            boolean vk = rain.cm != null;
+            if ((!vk && vao == 0) || fbo.fb == 0) { n = 0; return; }
+            if (!vk) {
+                fb.position(0);
+                fb.put(buf, 0, n * 8).position(0);
+                GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo);
+                GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, n * 8 * 4, fb);
+                GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
+            }
             fbo.bind();
-            GLES30.glEnable(GLES30.GL_BLEND);
-            GLES30.glBlendFunc(kind == 2 ? GLES30.GL_ZERO : GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA);
+            G.blend(kind == 2 ? G.BLEND_ERASE : G.BLEND_PREMUL);
             G.Prog p = kind == 0 ? rain.pDrop : kind == 1 ? rain.pTrail : rain.pErase;
             p.use();
             p.f2("uView", rain.W, rain.H);
-            GLES30.glBindVertexArray(vao);
-            GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, 6, n);
-            GLES30.glBindVertexArray(0);
+            if (vk) G.drawInstanced(rain.cm, buf, n);
+            else {
+                G.bindVao(vao);
+                GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, 6, n);
+            }
             n = 0;
         }
     }
 
     private final Batch stamp = new Batch(this, MIST, 0), trail = new Batch(this, TRAIL, 1), erase = new Batch(this, ERASE, 2), big = new Batch(this, MAX, 0);
     private G.Prog pDrop, pTrail, pErase, pEvap, pCompose;
-    private G.Mesh mFull;
-    private final G.Fbo copy = new G.Fbo(false), mistFb = new G.Fbo(false), waterFb = new G.Fbo(false);
+    private G.Mesh mFull, cm; // cm：Vulkan 时实例化绘制用的四个角（GL 时是 corners 这块缓冲）
+    // copy：GL 时场景画完整屏拷到这里；scr：Vulkan 时场景直接画进这块（带深度、和屏幕一样的多重采样），合成从它取
+    private final G.Fbo copy = new G.Fbo(false), scr = new G.Fbo(true), mistFb = new G.Fbo(false), waterFb = new G.Fbo(false);
     private int corners;
+
+    private G.Fbo shot() { return cm != null ? scr : copy; }
 
     /** GL 环境建好（第一次、或者丢了重建）：旧编号都作废 */
     void initGL() {
-        copy.forget(); mistFb.forget(); waterFb.forget();
+        copy.forget(); scr.forget(); mistFb.forget(); waterFb.forget();
         valid = false;
         if (active) fresh = true;
         pDrop = new G.Prog(V_INST, F_DROP);
@@ -302,10 +309,12 @@ final class Rain {
         pEvap = new G.Prog(V_FULL, F_EVAP);
         pCompose = new G.Prog(V_FULL, F_COMPOSE);
         mFull = G.quad(-1, -1, 1, 1);
+        float[] c = { -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1 };
+        if (G.vk()) { cm = new G.Mesh(c, new int[] { 2 }, null); return; }
+        cm = null;
         int[] b = new int[1];
         GLES30.glGenBuffers(1, b, 0);
         corners = b[0];
-        float[] c = { -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1 };
         FloatBuffer f = ByteBuffer.allocateDirect(c.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         f.put(c).position(0);
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, corners);
@@ -319,13 +328,21 @@ final class Rain {
         float kx = w / W, ky = h / H;
         for (Drop d : drops) { d.x *= kx; d.y *= ky; d.lx *= kx; d.ly *= ky; d.r *= ky; d.rT *= ky; d.trailAt *= ky; }
         W = w; H = h; dpr = dpr0;
-        if (copy.fb != 0) copy.size(bw0, bh0);
+        if (shot().fb != 0) shot().size(bw0, bh0);
         if (mistFb.fb != 0) { mistFb.free(); waterFb.free(); fresh = true; }
         valid = false;
     }
 
-    /** 场景画完：整屏拷下来给合成用（开着抗锯齿时顺便解析多重采样） */
+    /** Vulkan：这一帧的场景画进 scr（代替画到屏幕上；GL 时场景照常画到屏幕上，再 grab 拷下来） */
+    void target(int bw0, int bh0) {
+        scr.samples = G.samples();
+        scr.size(bw0, bh0);
+        scr.bind();
+    }
+
+    /** 场景画完：整屏拷下来给合成用（开着抗锯齿时顺便解析多重采样）；Vulkan 时场景已经在 scr 里了 */
     void grab(int bw0, int bh0) {
+        if (cm != null) { valid = true; return; }
         copy.size(bw0, bh0);
         GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0);
         GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, copy.fb);
@@ -336,39 +353,33 @@ final class Rain {
 
     /** 更新雾珠图、拼水图、整屏合成（场景没重画时也一样：用上次拷下来的） */
     void draw(float day, int bw0, int bh0) {
-        if (copy.fb == 0) return;
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
-        GLES30.glDepthMask(false);
-        GLES30.glDisable(GLES30.GL_CULL_FACE);
+        if (shot().fb == 0) return;
+        G.depthTest(false);
+        G.depthMask(false);
+        G.cull(false);
         int mw = Math.max(8, Math.round(W)), mh = Math.max(8, Math.round(H));
         if (mistFb.fb == 0 || mistFb.w != mw || mistFb.h != mh) {
             mistFb.size(mw, mh);
             waterFb.size(mw, mh);
             mistFb.bind();
-            GLES30.glClearColor(0, 0, 0, 0);
-            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT);
-            GLES30.glClearColor(0, 0, 0, 1);
+            G.clearColor(0, 0, 0, 0);
+            G.clear(true, false);
+            G.clearColor(0, 0, 0, 1);
         }
         if (fresh) { fresh = false; prefill(); }
         if (evap >= 0.25f) { // 隔一会儿蒸发一次（8 位颜色每次要减够一格）
             evap = 0;
             mistFb.bind();
-            GLES30.glEnable(GLES30.GL_BLEND);
-            GLES30.glBlendEquation(GLES30.GL_FUNC_REVERSE_SUBTRACT);
-            GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE);
+            G.blend(G.BLEND_EVAP);
             pEvap.use();
             pEvap.f("uE", 3 / 255f);
             mFull.draw();
-            GLES30.glBlendEquation(GLES30.GL_FUNC_ADD);
         }
         erase.flush(mistFb);
         stamp.flush(mistFb);
         trail.flush(mistFb);
         // 雾珠图拷进水图，再叠上大水珠
-        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, mistFb.fb);
-        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, waterFb.fb);
-        GLES30.glBlitFramebuffer(0, 0, mw, mh, 0, 0, mw, mh, GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_NEAREST);
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
+        G.copy(mistFb, waterFb);
         float s = 1 / (H * RMAX);
         for (int i = 0; i < drops.size(); i++) {
             Drop d = drops.get(i);
@@ -378,23 +389,22 @@ final class Rain {
         }
         big.flush(waterFb);
         // 整屏合成
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
-        GLES30.glViewport(0, 0, bw0, bh0);
-        GLES30.glDisable(GLES30.GL_BLEND);
+        G.screen(bw0, bh0);
+        G.blend(G.BLEND_OFF);
         pCompose.use();
-        pCompose.tex("uScene", 0, copy.tex);
+        pCompose.tex("uScene", 0, shot().tex);
         pCompose.tex("uWater", 1, waterFb.tex);
         pCompose.f2("uRes", bw0, bh0);
         pCompose.f("uLens", H * RMAX * dpr * 2.2f);
         pCompose.f("uDay", day);
         pCompose.f("uFade", fade);
         mFull.draw();
-        G.activeUnit(0);
+        if (cm == null) G.activeUnit(0);
     }
 
     /** 收掉：拷贝缓冲、雾珠图、水图都释放（整屏几块，不用就别占着） */
     void freeGL() {
-        copy.free(); mistFb.free(); waterFb.free();
+        copy.free(); scr.free(); mistFb.free(); waterFb.free();
         valid = false;
     }
 }

@@ -13,7 +13,7 @@ import javax.microedition.khronos.egl.EGLDisplay;
  * 抗锯齿（设置里开）是画布的 4 倍多重采样，只能在建画布时定：改了设置就换一块新画布（MainActivity.rebuild）；显卡不支持就不开。
  * 停着不动不出帧（场景要画才 requestRender）。手势交给场景（在 GL 线程里处理）
  */
-public class SceneView extends GLSurfaceView {
+public class SceneView extends GLSurfaceView implements Canvas3D {
     final Scene scene;
     private final float dens;
 
@@ -27,6 +27,9 @@ public class SceneView extends GLSurfaceView {
         setRenderer(scene);
         setRenderMode(RENDERMODE_WHEN_DIRTY);
     }
+
+    @Override public Scene scene() { return scene; }
+    @Override public android.view.View view() { return this; }
 
     /** RGBA8 + 24 位深度；要抗锯齿时先找 4 倍多重采样的，找不到退回不开 */
     private static final class Chooser implements EGLConfigChooser {

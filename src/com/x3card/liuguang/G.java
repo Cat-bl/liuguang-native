@@ -45,35 +45,84 @@ final class G {
     // ================= GL 状态缓存：值没变就不再交给驱动（每帧几十次绘制、几百个 uniform 大多和上一帧一样） =================
     // 当前程序、当前贴图单元、每个单元绑着的贴图只在一个画布（GL 上下文）里有效。全屏页和小窗口各有一块画布、各在自己的 GL 线程里画，
     // 所以按线程各记一份；建画布时 resetCache()。贴图都经 bindTex 绑；删贴图时 GL 会把它从单元上解开，forget() 跟着清掉
-    private static final class St { int prog = -1, unit = -1; final int[] bound = new int[32]; St() { java.util.Arrays.fill(bound, -1); } }
+    // vk：这个线程画的是 Vulkan 画布（VkSceneView）时绑着它，下面每个调用都交给它，不碰 GL
+    private static final class St { int prog = -1, unit = -1, vao = -1; boolean revEq; final int[] bound = new int[32]; Vk vk; St() { java.util.Arrays.fill(bound, -1); } }
     private static final ThreadLocal<St> ST = new ThreadLocal<St>() { @Override protected St initialValue() { return new St(); } };
-    static void resetCache() { ST.set(new St()); }
+    static void resetCache() { St n = new St(); n.vk = ST.get().vk; ST.set(n); }
+    static void useVk(Vk v) { ST.get().vk = v; }
+    static boolean vk() { return ST.get().vk != null; }
     static void activeUnit(int u) { St s = ST.get(); if (s.unit != u) { GLES30.glActiveTexture(GLES30.GL_TEXTURE0 + u); s.unit = u; } }
+    /** 绑 VAO（画完不解绑：改 VAO 内容的只有建网格时，都先绑上自己的；VAO 都经这里绑） */
+    static void bindVao(int vao) { St s = ST.get(); if (s.vao != vao) { GLES30.glBindVertexArray(vao); s.vao = vao; } }
     static void bindTex(int u, int tex) { activeUnit(u); St s = ST.get(); if (s.bound[u] != tex) { GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex); s.bound[u] = tex; } }
     private static void forget(int tex) { int[] b = ST.get().bound; for (int i = 0; i < b.length; i++) if (b[i] == tex) b[i] = 0; }
 
-    /** 一个着色器程序和它的 uniform（位置按名字取，取过就记住；值和上次交给它的一样就不再交） */
+    /**
+     * 一个着色器程序和它的 uniform（位置按名字取，取过就记住；值和上次交给它的一样就不再交）。
+     * Vulkan 时 id 是原生那边的编号，uniform 写进 vu / fu（顶点、片元两个块，布局 vsI / fsI），贴图记在 tx（按 sampler 的先后），画的时候 Vk 一起带走
+     */
     static final class Prog {
         final int id;
-        private static final class U { final int loc; int n; float a, b, c, d; float[] m; int i = Integer.MIN_VALUE; U(int l) { loc = l; } }
-        private final java.util.HashMap<String, U> us = new java.util.HashMap<>();
-        Prog(String vs, String fs) { id = program(vs, fs); }
-        private U uu(String n) { U x = us.get(n); if (x == null) { x = new U(GLES30.glGetUniformLocation(id, n)); us.put(n, x); } return x; }
+        final Vk vk;
+        Vk.Stage vsI, fsI;
+        float[] vu, fu;
+        final int[] tx = new int[4];
+        boolean vd, fd;
+        int vAt, fAt, seen = -1;
+        private static final class U { final int loc; int n; float a, b, c, d; float[] m; int i = Integer.MIN_VALUE; int vo = -1, fo = -1, ti = -1; U(int l) { loc = l; } }
+        private String[] names = new String[16];
+        private U[] us = new U[16];
+        private int un, hint = -1;
+        Prog(String vs, String fs) {
+            vk = ST.get().vk;
+            if (vk == null) { id = program(vs, fs); return; }
+            id = vk.prog(HEAD + vs, HEAD_F + fs, this);
+            if (vsI != null && vsI.size > 0) vu = new float[vsI.size / 4];
+            if (fsI != null && fsI.size > 0) fu = new float[fsI.size / 4];
+        }
+        /** 按名字找 uniform：每帧设参数的先后差不多一样，从上一次找到的下一个开始看；名字都是字面量，先按引用比，比不上再按内容比 */
+        private U uu(String n) {
+            for (int k = 0; k < un; k++) { int j = hint + 1 + k; if (j >= un) j -= un; if (names[j] == n) { hint = j; return us[j]; } }
+            for (int j = 0; j < un; j++) if (names[j].equals(n)) { hint = j; return us[j]; }
+            if (un == names.length) { names = java.util.Arrays.copyOf(names, un * 2); us = java.util.Arrays.copyOf(us, un * 2); }
+            U x;
+            if (vk == null) x = new U(GLES30.glGetUniformLocation(id, n));
+            else {
+                x = new U(-1);
+                Integer o = vsI != null ? vsI.off.get(n) : null;
+                if (o != null) x.vo = o;
+                o = fsI != null ? fsI.off.get(n) : null;
+                if (o != null) x.fo = o;
+                if (fsI != null) x.ti = fsI.sampler(n);
+            }
+            names[un] = n; us[un] = x; hint = un++;
+            return x;
+        }
+        /** Vulkan：值写进块里（k 个分量） */
+        private void put(U x, float a, float b, float c, float d, int k) {
+            if (x.vo >= 0) { float[] u = vu; int o = x.vo; u[o] = a; if (k > 1) u[o + 1] = b; if (k > 2) u[o + 2] = c; if (k > 3) u[o + 3] = d; vd = true; }
+            if (x.fo >= 0) { float[] u = fu; int o = x.fo; u[o] = a; if (k > 1) u[o + 1] = b; if (k > 2) u[o + 2] = c; if (k > 3) u[o + 3] = d; fd = true; }
+        }
         int u(String n) { return uu(n).loc; }
-        void use() { St s = ST.get(); if (s.prog != id) { GLES30.glUseProgram(id); s.prog = id; } }
-        void f(String n, float v) { U x = uu(n); if (x.n == 1 && x.a == v) return; x.n = 1; x.a = v; GLES30.glUniform1f(x.loc, v); }
-        void f2(String n, float a, float b) { U x = uu(n); if (x.n == 2 && x.a == a && x.b == b) return; x.n = 2; x.a = a; x.b = b; GLES30.glUniform2f(x.loc, a, b); }
-        void f3(String n, float a, float b, float c) { U x = uu(n); if (x.n == 3 && x.a == a && x.b == b && x.c == c) return; x.n = 3; x.a = a; x.b = b; x.c = c; GLES30.glUniform3f(x.loc, a, b, c); }
-        void f4(String n, float a, float b, float c, float d) { U x = uu(n); if (x.n == 4 && x.a == a && x.b == b && x.c == c && x.d == d) return; x.n = 4; x.a = a; x.b = b; x.c = c; x.d = d; GLES30.glUniform4f(x.loc, a, b, c, d); }
+        void use() { if (vk != null) { vk.prog = this; return; } St s = ST.get(); if (s.prog != id) { GLES30.glUseProgram(id); s.prog = id; } }
+        void f(String n, float v) { U x = uu(n); if (x.n == 1 && x.a == v) return; x.n = 1; x.a = v; if (vk != null) put(x, v, 0, 0, 0, 1); else GLES30.glUniform1f(x.loc, v); }
+        void f2(String n, float a, float b) { U x = uu(n); if (x.n == 2 && x.a == a && x.b == b) return; x.n = 2; x.a = a; x.b = b; if (vk != null) put(x, a, b, 0, 0, 2); else GLES30.glUniform2f(x.loc, a, b); }
+        void f3(String n, float a, float b, float c) { U x = uu(n); if (x.n == 3 && x.a == a && x.b == b && x.c == c) return; x.n = 3; x.a = a; x.b = b; x.c = c; if (vk != null) put(x, a, b, c, 0, 3); else GLES30.glUniform3f(x.loc, a, b, c); }
+        void f4(String n, float a, float b, float c, float d) { U x = uu(n); if (x.n == 4 && x.a == a && x.b == b && x.c == c && x.d == d) return; x.n = 4; x.a = a; x.b = b; x.c = c; x.d = d; if (vk != null) put(x, a, b, c, d, 4); else GLES30.glUniform4f(x.loc, a, b, c, d); }
         void c3(String n, float[] c) { f3(n, c[0], c[1], c[2]); }
         void m4(String n, float[] m) {
             U x = uu(n);
             if (x.m != null && java.util.Arrays.equals(x.m, m)) return;
             if (x.m == null) x.m = new float[16];
             System.arraycopy(m, 0, x.m, 0, 16);
-            GLES30.glUniformMatrix4fv(x.loc, 1, false, m, 0);
+            if (vk == null) { GLES30.glUniformMatrix4fv(x.loc, 1, false, m, 0); return; }
+            if (x.vo >= 0) { System.arraycopy(m, 0, vu, x.vo, 16); vd = true; }
+            if (x.fo >= 0) { System.arraycopy(m, 0, fu, x.fo, 16); fd = true; }
         }
-        void tex(String n, int unit, int tex) { bindTex(unit, tex); U x = uu(n); if (x.i != unit) { x.i = unit; GLES30.glUniform1i(x.loc, unit); } }
+        void tex(String n, int unit, int tex) {
+            if (vk != null) { U x = uu(n); if (x.ti >= 0) tx[x.ti] = tex; return; }
+            bindTex(unit, tex); U x = uu(n); if (x.i != unit) { x.i = unit; GLES30.glUniform1i(x.loc, unit); }
+        }
     }
 
     // ================= 网格 =================
@@ -81,12 +130,22 @@ final class G {
     static final class Mesh {
         int vao, vbo, ibo, count, mode = GLES30.GL_TRIANGLES;
         boolean indexed;
+        final Vk vk; // Vulkan 时 vao 是原生那边的编号
 
         Mesh(float[] data, int[] sizes, short[] index) {
+            vk = ST.get().vk;
+            if (vk != null) {
+                vao = vk.mesh(data, sizes, index);
+                int stride = 0;
+                for (int s : sizes) stride += s;
+                indexed = index != null;
+                count = index != null ? index.length : data.length / stride;
+                return;
+            }
             int[] b = new int[2];
             GLES30.glGenVertexArrays(1, b, 0);
             vao = b[0];
-            GLES30.glBindVertexArray(vao);
+            bindVao(vao);
             GLES30.glGenBuffers(index != null ? 2 : 1, b, 0);
             vbo = b[0];
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo);
@@ -110,26 +169,33 @@ final class G {
                 GLES30.glBufferData(GLES30.GL_ELEMENT_ARRAY_BUFFER, index.length * 2, sb, GLES30.GL_STATIC_DRAW);
                 count = index.length;
             } else count = data.length / stride;
-            GLES30.glBindVertexArray(0);
+            bindVao(0);
         }
+
+        private FloatBuffer upd; // 换顶点数据用的缓冲（长度不变，建一次反复用）
 
         /** 换顶点数据（长度不变：光点每次重新瞄准） */
         void update(float[] data) {
+            if (vk != null) { vk.meshData(vao, data); return; }
+            if (upd == null || upd.capacity() != data.length) upd = ByteBuffer.allocateDirect(data.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            upd.position(0);
+            upd.put(data).position(0);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo);
-            FloatBuffer fb = ByteBuffer.allocateDirect(data.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-            fb.put(data).position(0);
-            GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, data.length * 4, fb);
+            GLES30.glBufferSubData(GLES30.GL_ARRAY_BUFFER, 0, data.length * 4, upd);
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
         }
 
         void draw() {
-            GLES30.glBindVertexArray(vao);
+            if (vk != null) { vk.draw(this, mode == GLES30.GL_POINTS); return; }
+            bindVao(vao);
             if (indexed) GLES30.glDrawElements(mode, count, GLES30.GL_UNSIGNED_SHORT, 0);
             else GLES30.glDrawArrays(mode, 0, count);
-            GLES30.glBindVertexArray(0);
         }
 
         void free() {
+            if (vk != null) { vk.meshFree(vao); return; }
+            St s = ST.get();
+            if (s.vao == vao) s.vao = 0; // 删掉正绑着的 VAO，GL 会退回 0
             GLES30.glDeleteVertexArrays(1, new int[] { vao }, 0);
             GLES30.glDeleteBuffers(indexed ? 2 : 1, indexed ? new int[] { vbo, ibo } : new int[] { vbo }, 0);
         }
@@ -280,6 +346,8 @@ final class G {
 
     // ================= 贴图 =================
     static int texture(Bitmap b, boolean mip) {
+        Vk v = ST.get().vk;
+        if (v != null) return v.tex(b, mip);
         int[] t = new int[1];
         GLES30.glGenTextures(1, t, 0);
         bindTex(0, t[0]);
@@ -293,11 +361,86 @@ final class G {
     }
 
     static void update(int tex, Bitmap b) {
+        Vk v = ST.get().vk;
+        if (v != null) { v.texData(tex, b); return; }
         bindTex(0, tex);
         GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, b, 0);
     }
 
-    static void free(int tex) { if (tex != 0) { GLES30.glDeleteTextures(1, new int[] { tex }, 0); forget(tex); } }
+    static void free(int tex) {
+        if (tex == 0) return;
+        Vk v = ST.get().vk;
+        if (v != null) v.texFree(tex);
+        else { GLES30.glDeleteTextures(1, new int[] { tex }, 0); forget(tex); }
+    }
+
+    // ================= 状态（GL 时就是对应的那一个调用；Vulkan 时记下来，画的时候按它挑管线） =================
+    static void depthTest(boolean on) { Vk v = ST.get().vk; if (v != null) v.flag(Vk.ST_DTEST, on); else if (on) GLES30.glEnable(GLES30.GL_DEPTH_TEST); else GLES30.glDisable(GLES30.GL_DEPTH_TEST); }
+    static void depthMask(boolean on) { Vk v = ST.get().vk; if (v != null) v.flag(Vk.ST_DWRITE, on); else GLES30.glDepthMask(on); }
+    static void cull(boolean on) { Vk v = ST.get().vk; if (v != null) v.flag(Vk.ST_CULL, on); else if (on) GLES30.glEnable(GLES30.GL_CULL_FACE); else GLES30.glDisable(GLES30.GL_CULL_FACE); }
+    /** 剔除背面（Vulkan 只有这一种） */
+    static void cullBack() { if (ST.get().vk == null) GLES30.glCullFace(GLES30.GL_BACK); }
+    /** 预乘透明度的混合（ONE, ONE_MINUS_SRC_ALPHA）开 / 关 */
+    static void blendPremul(boolean on) { blend(on ? BLEND_PREMUL : BLEND_OFF); }
+    /** 混合方式：不混、预乘盖上（ONE, 1-SA）、挖掉（ZERO, 1-SA）、整体减（ONE, ONE，反向减：雨珠的雾珠图蒸发） */
+    static final int BLEND_OFF = 0, BLEND_PREMUL = 1, BLEND_ERASE = 2, BLEND_EVAP = 3;
+    static void blend(int mode) {
+        St s = ST.get();
+        if (s.vk != null) { s.vk.blend(mode); return; }
+        if (mode == BLEND_OFF) { GLES30.glDisable(GLES30.GL_BLEND); return; }
+        GLES30.glEnable(GLES30.GL_BLEND);
+        boolean rev = mode == BLEND_EVAP;
+        if (rev != s.revEq) { GLES30.glBlendEquation(rev ? GLES30.GL_FUNC_REVERSE_SUBTRACT : GLES30.GL_FUNC_ADD); s.revEq = rev; }
+        if (mode == BLEND_EVAP) GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE);
+        else GLES30.glBlendFunc(mode == BLEND_ERASE ? GLES30.GL_ZERO : GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA);
+    }
+
+    /** 离屏缓冲 src 的颜色整块拷到 dst（一样大） */
+    static void copy(Fbo src, Fbo dst) {
+        Vk v = ST.get().vk;
+        if (v != null) { v.copy(src.tex, dst.tex); return; }
+        GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, src.fb);
+        GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, dst.fb);
+        GLES30.glBlitFramebuffer(0, 0, src.w, src.h, 0, 0, src.w, src.h, GLES30.GL_COLOR_BUFFER_BIT, GLES30.GL_NEAREST);
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
+    }
+
+    /** 空的 RGB565 贴图 w × h，levels 级缩小图（歌单的封面图集；内容一块块往里传，见 sub） */
+    static int atlas(int w, int h, int levels) {
+        Vk v = ST.get().vk;
+        if (v != null) return v.atlas(w, h, levels);
+        int[] t = new int[1];
+        GLES30.glGenTextures(1, t, 0);
+        bindTex(0, t[0]);
+        GLES30.glTexStorage2D(GLES30.GL_TEXTURE_2D, levels, GLES30.GL_RGB565, w, h);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAX_LEVEL, levels - 1);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE);
+        return t[0];
+    }
+
+    /** Vulkan：实例化绘制（雨珠）：m 是每顶点的（四个角），inst 每实例 8 个数（两个 vec4），n 个 */
+    static void drawInstanced(Mesh m, float[] inst, int n) { Vk v = ST.get().vk; if (v != null) v.draw(m, false, inst, n); }
+
+    /** 往贴图 tex 的第 level 级 (x, y) 处传一块位图 */
+    static void sub(int tex, int level, int x, int y, Bitmap b) {
+        Vk v = ST.get().vk;
+        if (v != null) { v.texSub(tex, level, x, y, b); return; }
+        bindTex(0, tex);
+        GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, level, x, y, b);
+    }
+    /** 画到屏幕上（w × h） */
+    static void screen(int w, int h) { Vk v = ST.get().vk; if (v != null) v.bind(0); else { GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0); GLES30.glViewport(0, 0, w, h); } }
+    static void clearColor(float r, float g, float b, float a) { Vk v = ST.get().vk; if (v != null) v.clearColor(r, g, b, a); else GLES30.glClearColor(r, g, b, a); }
+    static void clear(boolean color, boolean depth) {
+        Vk v = ST.get().vk;
+        if (v != null) v.clear(color, depth);
+        else GLES30.glClear((color ? GLES30.GL_COLOR_BUFFER_BIT : 0) | (depth ? GLES30.GL_DEPTH_BUFFER_BIT : 0));
+    }
+    /** 屏幕的多重采样倍数（0 / 1 是没开） */
+    static int samples() { Vk v = ST.get().vk; if (v != null) return v.samples; int[] a = new int[1]; GLES30.glGetIntegerv(GLES30.GL_SAMPLES, a, 0); return a[0]; }
 
     /** 离屏缓冲：一张颜色贴图（RGBA8）+ 可选的深度缓冲 */
     static final class Fbo {
@@ -311,6 +454,8 @@ final class G {
             if (w2 == w && h2 == h && fb != 0) return;
             free();
             w = w2; h = h2;
+            Vk v = ST.get().vk;
+            if (v != null) { fb = tex = v.target(w, h, withDepth, samples); return; } // Vulkan：颜色贴图的编号就是这块缓冲的编号
             int[] a = new int[1];
             GLES30.glGenTextures(1, a, 0);
             tex = a[0];
@@ -359,7 +504,7 @@ final class G {
             if (GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) != GLES30.GL_FRAMEBUFFER_COMPLETE) freeMs();
         }
 
-        void bind() { GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, msFb != 0 ? msFb : fb); GLES30.glViewport(0, 0, w, h); }
+        void bind() { Vk v = ST.get().vk; if (v != null) { v.bind(tex); return; } GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, msFb != 0 ? msFb : fb); GLES30.glViewport(0, 0, w, h); }
 
         private static final int[] DEPTH_ATT = { GLES30.GL_DEPTH_ATTACHMENT };
 
@@ -384,6 +529,8 @@ final class G {
         }
 
         void free() {
+            Vk v = ST.get().vk;
+            if (v != null) { if (tex != 0) v.texFree(tex); fb = tex = 0; w = h = 0; return; }
             freeMs();
             if (fb != 0) GLES30.glDeleteFramebuffers(1, new int[] { fb }, 0);
             if (tex != 0) { GLES30.glDeleteTextures(1, new int[] { tex }, 0); G.forget(tex); }
@@ -404,12 +551,24 @@ final class G {
         out[12] = x; out[13] = y; out[14] = z; out[15] = 1;
     }
 
-    static void mul(float[] out, float[] a, float[] b) { Matrix.multiplyMM(out, 0, a, 0, b, 0); }
+    /** out = a × b（直接在 Java 里算：系统的 Matrix.multiplyMM 每次都要过 JNI 拷三个数组；out 可以就是 a 或 b） */
+    static void mul(float[] out, float[] a, float[] b) {
+        float a00 = a[0], a10 = a[1], a20 = a[2], a30 = a[3], a01 = a[4], a11 = a[5], a21 = a[6], a31 = a[7],
+            a02 = a[8], a12 = a[9], a22 = a[10], a32 = a[11], a03 = a[12], a13 = a[13], a23 = a[14], a33 = a[15];
+        for (int j = 0; j < 16; j += 4) {
+            float b0 = b[j], b1 = b[j + 1], b2 = b[j + 2], b3 = b[j + 3];
+            out[j] = a00 * b0 + a01 * b1 + a02 * b2 + a03 * b3;
+            out[j + 1] = a10 * b0 + a11 * b1 + a12 * b2 + a13 * b3;
+            out[j + 2] = a20 * b0 + a21 * b1 + a22 * b2 + a23 * b3;
+            out[j + 3] = a30 * b0 + a31 * b1 + a32 * b2 + a33 * b3;
+        }
+    }
 
     /** 点 (x, y, z) 乘矩阵（带透视除法）→ out[0..2] */
     static void project(float[] out, float[] m, float x, float y, float z) {
-        float[] v = { x, y, z, 1 }, r = new float[4];
-        Matrix.multiplyMV(r, 0, m, 0, v, 0);
-        out[0] = r[0] / r[3]; out[1] = r[1] / r[3]; out[2] = r[2] / r[3];
+        float w = m[3] * x + m[7] * y + m[11] * z + m[15];
+        out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) / w;
+        out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) / w;
+        out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) / w;
     }
 }

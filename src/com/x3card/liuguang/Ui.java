@@ -37,6 +37,7 @@ final class Ui extends FrameLayout {
         { "font", "歌词字体", new Object[][] { { "smiley", "得意黑" }, { "system", "系统字体" } }, null },
         { "theme", "深浅色", new Object[][] { { "auto", "跟随车机" }, { "light", "浅色" }, { "dark", "深色" } }, null },
         { "aa", "抗锯齿", ON, "边缘更平滑，更费显卡" },
+        { "render", "渲染方式", new Object[][] { { "vulkan", "Vulkan" }, { "gl", "OpenGL" } }, "Vulkan 更省处理器；画面不对时换成 OpenGL" },
         { "fps", "帧率", new Object[][] { { "auto", "自动" }, { "60", "60 帧" }, { "30", "30 帧" } }, "自动：画不过来降到 30 帧" },
         { "water", "水面倒影", ON, null },
         { "art", "背景封面", ON, null },
@@ -334,6 +335,7 @@ final class Ui extends FrameLayout {
         for (Object[] r : ROWS) {
             final String k = (String) r[0];
             if ("fsBar".equals(k) && fsMode.isEmpty()) continue;
+            if ("render".equals(k) && !Vk.supported(c)) continue; // 车机没有 Vulkan（或者起不来）：只有 OpenGL
             if (!first) { View ln = new View(c); ln.setBackgroundColor(line); body.addView(ln, new LinearLayout.LayoutParams(-1, Math.max(1, px(0.01f)))); }
             first = false;
             LinearLayout row = new LinearLayout(c);

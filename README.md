@@ -2,7 +2,7 @@
 
 比亚迪车机上的 3D 歌词应用。放进车机的多窗口（双画中画）或悬浮窗口里，显示正在放的歌：封面、歌名歌手、整首歌词、播放控制和进度。
 
-歌、歌词、封面都来自 4.5UI（宿主应用 BydModule），不用自己去接播放器。画面用 Java + OpenGL ES 3.0 直接画，不经过浏览器内核，比同样画面的网页卡片省很多处理器。
+歌、歌词、封面都来自 4.5UI（宿主应用 BydModule），不用自己去接播放器。画面用 Vulkan 直接画（设置里能换成 OpenGL ES 3.0），不经过浏览器内核，比同样画面的网页卡片省很多处理器。
 
 ## 画面
 
@@ -29,7 +29,7 @@
 
 ## 设置
 
-歌词字体（得意黑 / 系统字体）、深浅色（跟随车机 / 浅色 / 深色）、抗锯齿、帧率（自动 / 60 帧 / 30 帧）、水面倒影、背景封面、光带、玻璃上的雨珠（自动 / 开 / 关）、开场动画、换歌动画、全屏时收起状态栏。
+歌词字体（得意黑 / 系统字体）、深浅色（跟随车机 / 浅色 / 深色）、抗锯齿、渲染方式（Vulkan / OpenGL：Vulkan 更省处理器，画面不对时换成 OpenGL；车机没有 Vulkan 时自动用 OpenGL）、帧率（自动 / 60 帧 / 30 帧）、水面倒影、背景封面、光带、玻璃上的雨珠（自动 / 开 / 关）、开场动画、换歌动画、全屏时收起状态栏。
 
 ## 在车上用
 
@@ -54,6 +54,7 @@
 - Node.js 18 以上；
 - JDK 17（`javac`、`java`、`keytool`）；
 - Android SDK 里的 build-tools（测过 34，要带 aapt、aapt2、zipalign、`lib/d8.jar`、`lib/apksigner.jar`、`core-lambda-stubs.jar`）和 `platforms;android-30`（用它的 android.jar）。用 sdkmanager 装：`sdkmanager "build-tools;34.0.0" "platforms;android-30"`。
+- Android NDK（测过 r27c：编 `jni/` 里的 C++，还用它带的 glslc 编 Vulkan 的着色器）。用 sdkmanager 装：`sdkmanager "ndk;27.2.12479018"`；脚本从 `ANDROID_NDK_HOME` 或 `ANDROID_HOME/ndk/` 下找。
 
 设好 `ANDROID_HOME`（或 `ANDROID_SDK_ROOT`）和 `JAVA_HOME`，脚本自己去找工具；也可以直接设 `ANDROID_BUILD_TOOLS`（build-tools 目录）和 `ANDROID_JAR`（android.jar）。JDK 在 PATH 里也行。
 
@@ -89,11 +90,14 @@ node build.mjs --install  # 打完用 adb install -r 装上（adb 要在 PATH �
 | `Mock.java` | 模拟器里用车上录的假数据（数据不在源码里） |
 | `Scene.java` | 3D 场景、着色器、手势、出帧 |
 | `Rain.java` / `RainPick.java` / `BydWeather.java` | 雨珠、要不要下、读车机天气 |
-| `G.java` / `Txt.java` / `Palette.java` / `Spring.java` | GL 工具、歌词贴图和折行、封面取色、弹簧动画 |
+| `G.java` / `Txt.java` / `Palette.java` / `Spring.java` | 画图的工具（程序、网格、贴图、离屏缓冲，GL 和 Vulkan 共用一套调用）、歌词贴图和折行、封面取色、弹簧动画 |
+| `Vk.java` / `VkSceneView.java` / `Canvas3D.java` | Vulkan 后端：把每帧的绘制记下来一次交给原生代码；Vulkan 的画布；两种画布共用的接口 |
 | `Ui.java` / `Settings.java` / `InfoView.java` / `FullActivity.java` | 设置面板、设置存取、连不上宿主或没授权时的说明、全屏页 |
 | `Guide.java` | 新手引导（第一次打开时说明封面能点也能划） |
 
-`assets/`：歌词字体得意黑（官方 ttf 原样）和它的许可。
+`jni/lgvk.cpp`：Vulkan 的原生部分（设备、交换链、管线、贴图，每帧录命令、提交、显示）。`vk/shaders.mjs`：打包时把 Java 里的着色器原文转成 Vulkan 的写法、编成 SPIR-V（`assets/vk_*.spv`、`vk.json`）。
+
+`assets/`：歌词字体得意黑（官方 ttf 原样）和它的许可；Vulkan 的着色器。
 
 ## 许可
 

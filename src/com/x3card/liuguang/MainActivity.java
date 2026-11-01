@@ -43,7 +43,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
 
     private Uiplus host;
     private FrameLayout root;
-    private SceneView view;
+    private Canvas3D view;
     private InfoView info;
     private Ui ui;
     private MediaState song;
@@ -90,7 +90,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         view = newScene();
         info = new InfoView(this, this::infoPress);
         ui = new Ui(this, st, this);
-        root.addView(view, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(view.view(), new FrameLayout.LayoutParams(-1, -1));
         root.addView(info, new FrameLayout.LayoutParams(-1, -1));
         root.addView(ui, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
@@ -101,12 +101,12 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         main.postDelayed(clockTheme, 60000);
     }
 
-    private SceneView newScene() {
-        SceneView v = new SceneView(this, this, st.aa);
-        v.scene.setOpts(st);
-        v.scene.setDay(wantDay());
-        v.scene.setCovers(covers);
-        if (bydMedia != null) v.scene.setSongs(queue(), bydMedia.current());
+    private Canvas3D newScene() {
+        Canvas3D v = "vulkan".equals(st.render) && Vk.supported(this) ? new VkSceneView(this, this, st.aa) : new SceneView(this, this, st.aa);
+        v.scene().setOpts(st);
+        v.scene().setDay(wantDay());
+        v.scene().setCovers(covers);
+        if (bydMedia != null) v.scene().setSongs(queue(), bydMedia.current());
         return v;
     }
 
@@ -127,7 +127,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     protected void onStop() {
         started = false;
         main.removeCallbacks(guideTry);
-        if (ui.guiding()) { ui.guideHide(); view.scene.trackCover(false); } // 没看完就收起来了：不算看过，下次再出
+        if (ui.guiding()) { ui.guideHide(); view.scene().trackCover(false); } // 没看完就收起来了：不算看过，下次再出
         weatherWatch(false);
         host.background(); // 不马上断开：宿主的授权确认页会把这里盖住，授权申请挂在这个会话上
         bydMedia.stop();
@@ -168,7 +168,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     public void onBackPressed() {
         if (ui.guiding()) ui.guideOk();
         else if (ui.isOpen()) ui.closeAll();
-        else if (ui.shelfOn()) view.scene.shelf(4); // 歌单开着：先收搜索键盘，再关歌单
+        else if (ui.shelfOn()) view.scene().shelf(4); // 歌单开着：先收搜索键盘，再关歌单
         else super.onBackPressed();
     }
 
@@ -190,7 +190,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         if (booted) return;
         booted = true;
         pushSnap();
-        view.scene.boot(true);
+        view.scene().boot(true);
         rainApply();
     }
 
@@ -205,12 +205,12 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     /** 交给场景一份快照（带上车机媒体控制器给的红心） */
     private void pushSnap() {
         song.heart = song.on ? bydMedia.heart(song.title) : BydMedia.HIDE;
-        view.scene.setSnap(song.snap());
+        view.scene().setSnap(song.snap());
     }
 
     // ================= 歌单（场景里的 Shelf）：点了第几首（见 BydMedia、Player） =================
     private void pushSongs() {
-        view.scene.setSongs(queue(), bydMedia.current());
+        view.scene().setSongs(queue(), bydMedia.current());
     }
 
     /** 宿主说正在用的不是「多媒体」（单独装的音乐 App、蓝牙音乐……）：歌单、正在放哪首都是「多媒体」的，对不上，当没有歌单 */
@@ -231,7 +231,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         });
     }
 
-    @Override public void locate() { view.scene.shelfLocate(); }
+    @Override public void locate() { view.scene().shelfLocate(); }
     @Override public void shelfState(final boolean open) { main.post(() -> ui.setShelfOn(open)); }
     @Override public void locate(final int dir, final float y) { main.post(() -> ui.setLocate(dir, y)); }
 
@@ -263,34 +263,40 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     private void apply(String k) {
         switch (k) {
             case "theme": applyTheme(); break;
-            case "aa": rebuild(); break;
-            case "font": final String f = st.font; ioH.post(() -> { Txt.load(this, f); main.post(() -> view.scene.setOpts(st)); }); break; // 后台读好再换
+            case "aa": case "render": rebuild(); break;
+            case "font": final String f = st.font; ioH.post(() -> { Txt.load(this, f); main.post(() -> view.scene().setOpts(st)); }); break; // 后台读好再换
             case "fsBar": applyBar(); break;
             case "rain": weatherWatch(started && "auto".equals(st.rain)); rainApply(); break;
-            default: view.scene.setOpts(st); break;
+            default: view.scene().setOpts(st); break;
         }
     }
 
     /** 回到前台：全屏页和小窗口共用一份设置，另一边改过的跟上 */
     private void reload() {
         Settings n = Settings.load(this), o = st.copy();
-        for (String k : new String[] { "font", "theme", "aa", "fps", "water", "art", "ribbons", "rain", "intro", "reveal", "fsBar" }) {
+        for (String k : new String[] { "font", "theme", "aa", "render", "fps", "water", "art", "ribbons", "rain", "intro", "reveal", "fsBar" }) {
             if (!n.get(k).equals(o.get(k))) { st.set(k, n.get(k)); apply(k); }
         }
         ui.refresh();
     }
 
-    /** 抗锯齿只能在建画布时定：换一块新画布（场景重建，不再放开场动画） */
+    /** Vulkan 起不来（VkSceneView 叫的）：换成 OpenGL 的画布，设置里"渲染方式"那一行也藏起来 */
+    void vkFailed() {
+        if (view instanceof VkSceneView) rebuild();
+        ui.refresh();
+    }
+
+    /** 抗锯齿、渲染方式只能在建画布时定：换一块新画布（场景重建，不再放开场动画） */
     private void rebuild() {
-        SceneView old = view;
+        Canvas3D old = view;
         view = newScene();
-        root.addView(view, 0, new FrameLayout.LayoutParams(-1, -1));
-        root.removeView(old);
+        root.addView(view.view(), 0, new FrameLayout.LayoutParams(-1, -1));
+        root.removeView(old.view());
         if (!started || slept) view.onPause();
         ui.setShelfOn(false); // 新画布：歌单关着
         ui.setLocate(0, 0);
-        if (booted) { pushSnap(); view.scene.boot(false); }
-        view.scene.setRain(rainNow);
+        if (booted) { pushSnap(); view.scene().boot(false); }
+        view.scene().setRain(rainNow);
     }
 
     /** 全屏页里按设置收起 / 显示顶端状态栏 */
@@ -332,7 +338,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
 
     private void applyTheme() {
         boolean d = wantDay();
-        view.scene.setDay(d);
+        view.scene().setDay(d);
         ui.setDay(d);
     }
 
@@ -352,7 +358,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
         long now = SystemClock.uptimeMillis();
         if (rp.newTrack(song, now)) { main.removeCallbacks(rainCheck); main.postDelayed(rainCheck, RainPick.WAIT + 100); } // 换歌：新歌的歌词等一会儿还没到就按已有的定
         Boolean want = "on".equals(st.rain) ? Boolean.TRUE : "off".equals(st.rain) ? Boolean.FALSE : rp.auto(song, now, weather.rainingNow(System.currentTimeMillis()));
-        if (want != null && want != rainNow) { rainNow = want; view.scene.setRain(want); }
+        if (want != null && want != rainNow) { rainNow = want; view.scene().setRain(want); }
     }
 
     /** 读一次车机天气（后台线程），读到了再定一次。天气应用每次刷新，数据变化通知和广播差不多同时到：排着一次就不再排 */
@@ -534,8 +540,8 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     private void guideTry() {
         if (prefs.getBoolean("guide", false) || ui.guiding() || !started || slept || !ui.keysUp()) return;
         if (ui.isOpen() || ui.shelfOn() || info.covering() || !song.on) { guideLater(2000); return; }
-        view.scene.trackCover(true);
-        ui.showGuide(() -> { prefs.edit().putBoolean("guide", true).apply(); view.scene.trackCover(false); });
+        view.scene().trackCover(true);
+        ui.showGuide(() -> { prefs.edit().putBoolean("guide", true).apply(); view.scene().trackCover(false); });
     }
 
 }

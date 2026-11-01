@@ -6,7 +6,6 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.opengl.GLES30;
 import android.opengl.Matrix;
 
 /**
@@ -221,8 +220,8 @@ final class SearchPad {
     /** 画在场景最上面（只在主画面里） */
     void draw(float[] Pp) {
         if (slab == null || k.x < 0.002f || capsTex == 0) return;
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
-        GLES30.glDisable(GLES30.GL_BLEND);
+        G.depthTest(false);
+        G.blendPremul(false);
         G.Prog pp = sc.pPill;
         pp.use();
         pp.m4("uP", Pp); pp.m4("uMV", mv);
@@ -231,8 +230,7 @@ final class SearchPad {
         pp.f2("uHalf", Lw / 2, Lh / 2); pp.f("uDay", sc.day);
         pp.c3("uTint", sc.pal.c[0]);
         slab.draw();
-        GLES30.glEnable(GLES30.GL_BLEND);
-        GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA);
+        G.blendPremul(true);
         pPad.use();
         pPad.m4("uP", Pp); pPad.m4("uMV", mvo);
         pPad.tex("uCaps", 0, capsTex);
@@ -244,7 +242,7 @@ final class SearchPad {
         pPad.f2("uSize", Lw, Lh); pPad.f("uSR", Lh * 0.07f); pPad.f("uSI", bv); pPad.f("uDay", sc.day);
         pPad.c3("uInk", sc.ink); pPad.f("uK", k.x);
         sc.mUnit.draw();
-        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+        G.depthTest(true);
     }
 
     // ================= 点 =================

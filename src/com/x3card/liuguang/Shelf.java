@@ -5,8 +5,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
-import android.opengl.GLES30;
-import android.opengl.GLUtils;
 import android.opengl.Matrix;
 
 import java.util.ArrayList;
@@ -513,16 +511,7 @@ final class Shelf {
         gen++;
         alive = true;
         if (atlas != 0) return;
-        int[] t = new int[1];
-        GLES30.glGenTextures(1, t, 0);
-        atlas = t[0];
-        G.bindTex(0, atlas);
-        GLES30.glTexStorage2D(GLES30.GL_TEXTURE_2D, SongCovers.LEVELS, GLES30.GL_RGB565, AW, AH);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAX_LEVEL, SongCovers.LEVELS - 1);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE);
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE);
+        atlas = G.atlas(AW, AH, SongCovers.LEVELS);
     }
 
     /** 关完了：图集、歌名、大图、排着没传的全部还掉（键盘收完自己还；搜索索引留着，歌单没变下次直接用） */
@@ -577,9 +566,8 @@ final class Shelf {
             if (x.mips == null || (had != null && (!fake.contains(x.url) || x.fake))) { recycle(x.mips); continue; }
             int s = had != null ? had : freeSlot(); // 先顶上的生成封面换成取到的：同一格，不再淡进来
             if (s < 0) { recycle(x.mips); continue; }
-            G.bindTex(0, atlas);
             int px = (s % COLS) * TS, py = (s / COLS) * TS;
-            for (int l = 0; l < x.mips.length; l++) GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, l, px >> l, py >> l, x.mips[l]);
+            for (int l = 0; l < x.mips.length; l++) G.sub(atlas, l, px >> l, py >> l, x.mips[l]);
             recycle(x.mips);
             if (x.fake) fake.add(x.url); else fake.remove(x.url);
             if (had == null) { slotUrl[s] = x.url; slotOf.put(x.url, s); slotAt[s] = time; }
@@ -843,12 +831,12 @@ final class Shelf {
         if (!engaged()) return;
         float base = smooth(0.72f, 1, p);
         G.Prog pt = sc.pText;
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
+        G.depthTest(false);
         pt.use();
         pt.m4("uP", Pp);
         if (lbl != null) drawLabel(lbl, V, base);
         for (Lbl o : lblOld) drawLabel(o, V, base);
-        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+        G.depthTest(true);
         if (sK > 0.001f && countTex != 0 && pScrub != null) {
             pScrub.use();
             sc.mv(V, sc.iconsM);

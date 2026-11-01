@@ -1,7 +1,6 @@
 package com.x3card.liuguang;
 
 import android.graphics.Bitmap;
-import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import android.os.SystemClock;
@@ -40,13 +39,15 @@ final class Scene implements GLSurfaceView.Renderer {
 
     final Shelf shelf = new Shelf(this);
 
-    final SceneView view;
+    final Canvas3D view;
+    final boolean vkView; // Vulkan 画布
     final Host host;
     private final float dens;
     final float DPR;
 
-    Scene(SceneView view, Host host, float density) {
+    Scene(Canvas3D view, Host host, float density) {
         this.view = view;
+        this.vkView = view instanceof VkSceneView;
         this.host = host;
         this.dens = density;
         this.DPR = Math.min(density, 1.5f);
@@ -134,7 +135,8 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     // ================= GL 对象 =================
-    G.Prog pAur, pBg, pRib, pWater, pGlass, pHalo, pArt, pLine, pText, pPill, pIcons, pSeek, pDust, pPart;
+    G.Prog pAur, pBg, pRib, pWater, pGlass, pHalo, pArt, pLine, pText, pPill, pSeek, pDust, pPart;
+    G.Prog[] pIcons; // 控制条上的图形：GL 一段，Vulkan 四段（见 F_ICONS_A）
     G.Mesh mFull, mUnit, mStrip, mGlass, mHalo, mPill, mDust, mPart;
     final G.Fbo aurFbo = new G.Fbo(false), waterFbo = new G.Fbo(true);
     /** 封面贴图：按 Bitmap 记，只留正在用的几张；GL 环境丢了全部重传 */
@@ -333,13 +335,14 @@ final class Scene implements GLSurfaceView.Renderer {
         + "}";
 
     // uBx：上一首、下一首离中间多远；uHx：红心在哪（见 pillPlace）；uHeart：x 显示、y 实心（收藏了）、z 按下去的缩放
-    private static final String F_ICONS = "uniform float uW, uH, uPlay, uProg, uK, uDay, uBx, uHx; uniform vec3 uPress, uInk, uAcc, uHeart; uniform sampler2D uTime; in vec2 vUv; out vec4 o;\n"
+    private static final String ICONS_HEAD = "uniform float uW, uH, uPlay, uProg, uK, uDay, uBx, uHx; uniform vec3 uPress, uInk, uAcc, uHeart; uniform sampler2D uTime; in vec2 vUv; out vec4 o;\n"
         + "float sdRB(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }\n"
         + "float sdHeart(vec2 p) { p.x = abs(p.x); if (p.y + p.x > 1.0) return length(p - vec2(0.25, 0.75)) - 0.35355339;\n"
         + "  vec2 a = p - vec2(0.0, 1.0), b = p - 0.5 * max(p.x + p.y, 0.0); return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y); }\n"
         + "float sdTri(vec2 p, float r) { const float k = 1.7320508; p.x = abs(p.x) - r; p.y = p.y + r / k;\n"
         + "  if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0; p.x -= clamp(p.x, -2.0 * r, 0.0); return -length(p) * sign(p.y); }\n"
-        + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n"
+        + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n";
+    private static final String F_ICONS = ICONS_HEAD
         + "void main() {\n"
         + "  vec2 p = (vUv - 0.5) * vec2(uW, uH); float h = uH;\n"
         + "  vec2 c = p / uPress.y; float r = h * 0.2;\n"
@@ -361,6 +364,48 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  float aInk = inkA * 0.95, aTm = tm.a * 0.62;\n"
         + "  vec3 col = uInk * (aInk + base + aTm + hl) + accC * (on + hf) * 1.1;\n"
         + "  float al = clamp(aInk + base + aTm + on + hl + hf, 0.0, 1.0);\n"
+        + "  o = vec4(col * uK, al * uK);\n"
+        + "}";
+    // Vulkan：这台车的驱动编不了上面整段（太大；拆成两段时带取贴图的那段又编错了），拆成四次画：播放暂停和上下首 / 进度圈 / 红心 / 时间
+    // （各画各的地方、不重叠，叠出来和一次画一样）
+    private static final String F_ICONS_A = ICONS_HEAD
+        + "void main() {\n"
+        + "  vec2 p = (vUv - 0.5) * vec2(uW, uH); float h = uH;\n"
+        + "  vec2 c = p / uPress.y; float r = h * 0.2;\n"
+        + "  float dPlay = sdTri(vec2(c.y, c.x - r * 0.16), r) - r * 0.12;\n"
+        + "  float dPause = min(sdRB(c - vec2(-r * 0.42, 0.0), vec2(r * 0.2, r * 0.82), r * 0.08), sdRB(c - vec2(r * 0.42, 0.0), vec2(r * 0.2, r * 0.82), r * 0.08));\n"
+        + "  float d = mix(dPlay, dPause, uPlay);\n"
+        + "  float bx = uBx, rs = h * 0.115;\n"
+        + "  vec2 a = (p - vec2(-bx, 0.0)) / uPress.x, b = (p - vec2(bx, 0.0)) / uPress.z;\n"
+        + "  float dPrev = min(sdTri(vec2(a.y, -(a.x + rs * 0.55)), rs), sdTri(vec2(a.y, -(a.x - rs * 0.75)), rs)) - rs * 0.1;\n"
+        + "  float dNext = min(sdTri(vec2(b.y, b.x + rs * 0.75), rs), sdTri(vec2(b.y, b.x - rs * 0.55), rs)) - rs * 0.1;\n"
+        + "  float aInk = max(fill(d), max(fill(dPrev), fill(dNext))) * 0.95;\n"
+        + "  o = vec4(uInk * aInk * uK, aInk * uK);\n"
+        + "}";
+    private static final String F_ICONS_B = ICONS_HEAD
+        + "void main() {\n"
+        + "  vec2 p = (vUv - 0.5) * vec2(uW, uH); float h = uH;\n"
+        + "  float R = h * 0.34, ring = abs(length(p) - R) - h * 0.022;\n"
+        + "  float ang = atan(p.x, p.y) / 6.2831853; ang = ang < 0.0 ? ang + 1.0 : ang;\n"
+        + "  float on = fill(ring) * step(ang, uProg), base = fill(ring) * 0.22;\n"
+        + "  vec3 accC = mix(uAcc, uAcc * 0.62, uDay);\n"
+        + "  vec3 col = uInk * base + accC * on * 1.1;\n"
+        + "  float al = clamp(base + on, 0.0, 1.0);\n"
+        + "  o = vec4(col * uK, al * uK);\n"
+        + "}";
+    private static final String F_ICONS_D = ICONS_HEAD
+        + "void main() {\n"
+        + "  float aTm = texture(uTime, vec2(vUv.x, 1.0 - vUv.y)).a * 0.62;\n"
+        + "  o = vec4(uInk * aTm * uK, aTm * uK);\n"
+        + "}";
+    private static final String F_ICONS_C = ICONS_HEAD
+        + "void main() {\n"
+        + "  vec2 p = (vUv - 0.5) * vec2(uW, uH); float h = uH;\n"
+        + "  vec3 accC = mix(uAcc, uAcc * 0.62, uDay);\n"
+        + "  float hs = h * 0.22 * uHeart.z, dH = sdHeart((p - vec2(uHx, -hs * 0.55)) / hs) * hs, hk = uHeart.x;\n"
+        + "  float hf = fill(dH) * uHeart.y * hk, hl = fill(abs(dH) - h * 0.016) * (1.0 - uHeart.y) * hk * 0.95;\n"
+        + "  vec3 col = uInk * hl + accC * hf * 1.1;\n"
+        + "  float al = clamp(hl + hf, 0.0, 1.0);\n"
         + "  o = vec4(col * uK, al * uK);\n"
         + "}";
 
@@ -403,7 +448,7 @@ final class Scene implements GLSurfaceView.Renderer {
     public void onSurfaceCreated(GL10 gl, EGLConfig cfg) {
         G.resetCache(); // 新画布：GL 的状态全是初始的
         fontNow = wantFont;
-        Txt.use(Txt.load(view.getContext(), fontNow));
+        Txt.use(Txt.load(view.view().getContext(), fontNow));
         pAur = new G.Prog(V_FULL, F_AUR);
         pBg = new G.Prog("layout(location = 0) in vec3 position; layout(location = 1) in vec2 uv; out vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.999, 1.0); }", F_BG);
         pRib = new G.Prog(V_RIB, F_RIB);
@@ -414,7 +459,7 @@ final class Scene implements GLSurfaceView.Renderer {
         pLine = new G.Prog(V_LINE, F_LINE);
         pText = new G.Prog(V_UV, F_TEXT);
         pPill = new G.Prog(V_SOLID, F_PILL);
-        pIcons = new G.Prog(V_UV, F_ICONS);
+        pIcons = G.vk() ? new G.Prog[] { new G.Prog(V_UV, F_ICONS_A), new G.Prog(V_UV, F_ICONS_B), new G.Prog(V_UV, F_ICONS_C), new G.Prog(V_UV, F_ICONS_D) } : new G.Prog[] { new G.Prog(V_UV, F_ICONS) };
         pSeek = new G.Prog(V_UV, F_SEEK);
         pDust = new G.Prog(V_DUST, F_DUST);
         pPart = new G.Prog(V_PART, F_PART);
@@ -438,9 +483,7 @@ final class Scene implements GLSurfaceView.Renderer {
         texFront = texFront2 = texBack = 0;
         texArt[0] = texArt[1] = texArt[2] = 0;
         aurFbo.forget(); waterFbo.forget();
-        int[] smp = new int[1];
-        GLES30.glGetIntegerv(GLES30.GL_SAMPLES, smp, 0);
-        waterFbo.samples = smp[0]; // 画布开着抗锯齿：倒影也一样多重采样
+        waterFbo.samples = G.samples(); // 画布开着抗锯齿：倒影也一样多重采样
         rain.initGL();
         timeTex = 0;
         seekTex = 0;
@@ -451,7 +494,7 @@ final class Scene implements GLSurfaceView.Renderer {
         TT.cur = null;
         TT.old.clear();
         if (ready) { lyricsSong(clock, false); titleSong(false); }
-        GLES30.glClearColor(0, 0, 0, 1);
+        G.clearColor(0, 0, 0, 1);
     }
 
     @Override
@@ -519,8 +562,8 @@ final class Scene implements GLSurfaceView.Renderer {
 
     private void aurRender() {
         aurFbo.bind();
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
-        GLES30.glDisable(GLES30.GL_BLEND);
+        G.depthTest(false);
+        G.blendPremul(false);
         pAur.use();
         pAur.f("uT", clock); pAur.f("uAsp", W / H); pAur.f("uK", aurK); pAur.f("uDay", day);
         pAur.c3("uC1", aC1); pAur.c3("uC2", aC2); pAur.c3("uC3", aC3);
@@ -979,8 +1022,8 @@ final class Scene implements GLSurfaceView.Renderer {
         seekVis.t = seekSel >= 0 ? 1 : 0;
         if (seekVis.step(dt)) moving = true;
         if (seekPress.step(dt)) moving = true;
-        String t = fmt(seekMs);
-        if (seekVis.x > 0.002f && (!t.equals(seekText) || seekTex == 0)) {
+        String t = seekVis.x > 0.002f ? fmt(seekMs) : null; // 定位线藏着时不拼字
+        if (t != null && (!t.equals(seekText) || seekTex == 0)) {
             seekText = t;
             Txt.Label l = Txt.label(t, Fpx * 0.3f, W, false);
             if (seekTex != 0) G.free(seekTex);
@@ -1011,7 +1054,7 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     private void drawSeek(float[] V, float[] Pp) {
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
+        G.depthTest(false);
         float x0 = seekX0 - 2, x1 = seekBx + seekR * 1.2f, h = seekR * 2.6f, cxq = (x0 + x1) / 2;
         G.compose(seekM, cxq, 0, 0, 0, 0, 0, x1 - x0, h, 1);
         G.mul(seekLM, lygM, seekM);
@@ -1034,7 +1077,7 @@ final class Scene implements GLSurfaceView.Renderer {
             pText.tex("uMap", 0, seekTex); pText.f("uA", seekVis.x * 0.8f); pText.f("uK", 1);
             mSeekLbl.draw();
         }
-        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+        G.depthTest(true);
     }
 
     // ================= 歌名、歌手 =================
@@ -1103,6 +1146,7 @@ final class Scene implements GLSurfaceView.Renderer {
     float pillLw = 1, pillLh = 1, pillF = 1, iconsZ, pillVis; // pillVis：控制条这块玻璃显示多少（开场浮上来）
     private float pillBx, pillHx, pillFontK = 1; // 上一首、下一首离中间多远，红心在哪，时间字缩到几成（见 pillPlace）
     private String pillKey = "", timeText = "";
+    private long timeKey = -1;
     final float[] pillM = new float[16], iconsM = new float[16];
 
     private boolean hasSongs;
@@ -1186,15 +1230,19 @@ final class Scene implements GLSurfaceView.Renderer {
         float y1 = y * ca + pillZ * sa, z1 = -y * sa + pillZ * ca;
         G.compose(pillM, pillSx * cb - z1 * sb, y1, pillSx * sb + z1 * cb, 0.06f + (float) Math.sin(time * 0.4) * 0.02f, 0.16f + (float) Math.sin(time * 0.31) * 0.03f, 0, 1, 1, 1);
         G.compose(iconsM, 0, 0, iconsZ, 0, 0, 0, pillLw, pillLh, 1);
-        G.mul(iconsM, pillM, iconsM.clone());
+        G.mul(iconsM, pillM, iconsM);
         pillVis = clamp(k0, 0, 1) * clamp(rise.x * 1.5f - 0.5f, 0, 1);
         pillK = pillVis * (1 - shelf.ctlK()); // 歌单开着：按键淡掉，同一块玻璃上换成刻度条（Shelf 画）
-        String dTxt = dur > 0 ? fmt(dur) : "--:--", txt = fmt(ms) + "|" + dTxt;
-        if (!txt.equals(timeText) && timeBmp != null) {
-            timeText = txt;
-            float pxw = pillLw / 512;
-            Txt.time(timeBmp, fmt(ms), dTxt, pillLh * 0.24f * pillFontK / pxw);
-            if (timeTex == 0) timeTex = G.texture(timeBmp, false); else G.update(timeTex, timeBmp);
+        long tk = ms / 1000 * 100000 + (dur > 0 ? dur / 1000 : 99999); // 两头的时间按秒变：秒数没变不拼字
+        if ((tk != timeKey || timeText.isEmpty()) && timeBmp != null) {
+            timeKey = tk;
+            String dTxt = dur > 0 ? fmt(dur) : "--:--", txt = fmt(ms) + "|" + dTxt;
+            if (!txt.equals(timeText)) {
+                timeText = txt;
+                float pxw = pillLw / 512;
+                Txt.time(timeBmp, fmt(ms), dTxt, pillLh * 0.24f * pillFontK / pxw);
+                if (timeTex == 0) timeTex = G.texture(timeBmp, false); else G.update(timeTex, timeBmp);
+            }
         }
         return moving;
     }
@@ -1517,15 +1565,14 @@ final class Scene implements GLSurfaceView.Renderer {
         }
         lastT = t;
         clock = (t - t0) / 1000f;
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
-        GLES30.glViewport(0, 0, bw, bh);
+        G.screen(bw, bh);
         if (!ready && bootWanted && W > 1) doBoot();
-        if (!ready || pal == null) { GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT); lastT = 0; return; }
+        if (!ready || pal == null) { G.clear(true, false); lastT = 0; return; }
         boolean moving0 = false;
         String wf = wantFont;
         if (!wf.equals(fontNow)) { // 换了字体：歌词、歌名重画（同网页版 retext）
             fontNow = wf;
-            Txt.use(Txt.load(view.getContext(), wf));
+            Txt.use(Txt.load(view.view().getContext(), wf));
             measureSong(); lyricsSong(clock, false); titleSong(false);
         }
 
@@ -1574,10 +1621,10 @@ final class Scene implements GLSurfaceView.Renderer {
         if (!still) {
             aurRender();
             if (stWater) waterRender(waterK, ribK);
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0);
-            GLES30.glViewport(0, 0, bw, bh);
-            GLES30.glDepthMask(true);
-            GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
+            if (vkView && rain.on()) rain.target(bw, bh); // Vulkan：要下雨珠时场景画进雨珠的离屏缓冲，再合成到屏幕上（GL 是画到屏幕上再拷下来）
+            else G.screen(bw, bh);
+            G.depthMask(true);
+            G.clear(true, true);
             drawScene(I, P, false, bw, bh, ribK, waterK, dustK);
             if (rain.on()) rain.grab(bw, bh);
         }
@@ -1586,7 +1633,7 @@ final class Scene implements GLSurfaceView.Renderer {
         if (busy || rainMv) view.requestRender();
         else {
             lastT = 0;
-            if (rain.on()) { view.removeCallbacks(rainWake); view.postDelayed(rainWake, (long) Math.max(60, (rain.next() - clock) * 1000)); } // 水珠都挂着不动：到下一颗该滑的时候再叫醒
+            if (rain.on()) { view.view().removeCallbacks(rainWake); view.view().postDelayed(rainWake, (long) Math.max(60, (rain.next() - clock) * 1000)); } // 水珠都挂着不动：到下一颗该滑的时候再叫醒
         }
     }
 
@@ -1641,9 +1688,9 @@ final class Scene implements GLSurfaceView.Renderer {
         for (int i = 0; i < 4; i++) CL[i] *= sc;
         e[2] = CL[0]; e[6] = CL[1]; e[10] = CL[2] + 1; e[14] = CL[3];
         waterFbo.bind();
-        GLES30.glClearColor(0, 0, 0, 1);
-        GLES30.glDepthMask(true); // 能写深度才清得掉（上一帧画透明的东西时关了）
-        GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
+        G.clearColor(0, 0, 0, 1);
+        G.depthMask(true); // 能写深度才清得掉（上一帧画透明的东西时关了）
+        G.clear(true, true);
         drawScene(Vr, Pr, true, waterFbo.w, waterFbo.h, ribK, waterK, 0);
         waterFbo.resolve();
     }
@@ -1662,15 +1709,15 @@ final class Scene implements GLSurfaceView.Renderer {
     private void mvS(float[] V) { G.mul(MV, V, S); }
 
     private void blendPremul(boolean on) {
-        if (on) { GLES30.glEnable(GLES30.GL_BLEND); GLES30.glBlendFunc(GLES30.GL_ONE, GLES30.GL_ONE_MINUS_SRC_ALPHA); } else GLES30.glDisable(GLES30.GL_BLEND);
+        G.blendPremul(on);
     }
 
     private void drawScene(float[] V, float[] Pp, boolean refl, int rw, int rh, float ribK, float waterK, float dustK) {
-        GLES30.glEnable(GLES30.GL_CULL_FACE);
-        GLES30.glCullFace(GLES30.GL_BACK);
+        G.cull(true);
+        G.cullBack();
         // 背景：极光铺满（跟着场景转的方向反着挪一点），四角压暗
-        GLES30.glDisable(GLES30.GL_DEPTH_TEST);
-        GLES30.glDepthMask(false);
+        G.depthTest(false);
+        G.depthMask(false);
         blendPremul(false);
         pBg.use();
         pBg.tex("uAur", 0, aurFbo.tex);
@@ -1678,8 +1725,8 @@ final class Scene implements GLSurfaceView.Renderer {
         pBg.f("uDay", day);
         mFull.draw();
         // 不透明的：封面玻璃、控制条玻璃
-        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
-        GLES30.glDepthMask(true);
+        G.depthTest(true);
+        G.depthMask(true);
         boolean showCover = coverVisible && !shelf.engaged(); // 歌单开着：封面砖交给歌单（hero 砖）
         if (showCover) {
             pGlass.use();
@@ -1704,7 +1751,7 @@ final class Scene implements GLSurfaceView.Renderer {
         }
         shelf.drawSolid(V, Pp); // 歌单的砖
         // 半透明的：按网页版的先后（背景封面、光带、水面、影子、浮尘、歌词、歌名、控制条的图形、光点）
-        GLES30.glDepthMask(false);
+        G.depthMask(false);
         blendPremul(true);
         if (stArt) {
             pArt.use();
@@ -1715,7 +1762,7 @@ final class Scene implements GLSurfaceView.Renderer {
             mUnit.draw();
         }
         if (stRibbons) {
-            GLES30.glDisable(GLES30.GL_CULL_FACE);
+            G.cull(false);
             pRib.use();
             mvS(V);
             pRib.m4("uP", Pp); pRib.m4("uMV", MV);
@@ -1728,10 +1775,10 @@ final class Scene implements GLSurfaceView.Renderer {
                 pRib.f("uAmp", H * o[3]); pRib.f("uPh", o[4]); pRib.f("uTw", o[5]); pRib.c3("uC1", c1); pRib.c3("uC2", c2); pRib.f("uK", ribK); pRib.f("uDay", day);
                 mStrip.draw();
             }
-            GLES30.glEnable(GLES30.GL_CULL_FACE);
+            G.cull(true);
         }
         if (!refl && stWater && waterOk) {
-            GLES30.glDepthMask(true);
+            G.depthMask(true);
             pWater.use();
             G.mul(MV, V, waterM);
             pWater.m4("uP", Pp); pWater.m4("uMV", MV); pWater.m4("uTexM", texM);
@@ -1739,7 +1786,7 @@ final class Scene implements GLSurfaceView.Renderer {
             pWater.tex("uRefl", 0, waterFbo.tex);
             pWater.f("uT", clock); pWater.f("uK", waterK); pWater.f("uDay", day); pWater.c3("uTint", aC1);
             mUnit.draw();
-            GLES30.glDepthMask(false);
+            G.depthMask(false);
         }
         if (!refl && showCover) {
             pHalo.use();
@@ -1770,28 +1817,30 @@ final class Scene implements GLSurfaceView.Renderer {
         for (LineObj o : LY.objs.values()) drawLine(o, V, lm);
         // 歌名、歌手（不照进水里）
         if (!refl) {
-            GLES30.glDisable(GLES30.GL_DEPTH_TEST);
+            G.depthTest(false);
             pText.use();
             pText.m4("uP", Pp); pText.c3("uInk", ink);
             if (TT.cur != null) drawTitle(TT.cur, V);
             for (Title o : TT.old) drawTitle(o, V);
-            GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+            G.depthTest(true);
         }
         shelf.drawText(V, Pp); // 歌单：中间那首的歌名、刻度条上的线和点
         // 控制条上的图形、进度圈、时间
         if (rise.x > 0.001f && pillK > 0.002f && timeTex != 0) {
-            pIcons.use();
             mv(V, iconsM);
-            pIcons.m4("uP", Pp); pIcons.m4("uMV", MV);
-            pIcons.f("uW", pillLw); pIcons.f("uH", pillLh); pIcons.f("uPlay", play.x); pIcons.f("uProg", dur > 0 ? clamp(MS.pos() / (float) dur, 0, 1) : 0);
-            pIcons.f3("uPress", press[0].x, press[1].x, press[2].x); pIcons.f3("uHeart", heartVis.x, heartFill.x, press[3].x); pIcons.f("uBx", pillBx); pIcons.f("uHx", pillHx); pIcons.c3("uInk", ink); pIcons.c3("uAcc", pal.accent); pIcons.tex("uTime", 0, timeTex);
-            pIcons.f("uK", pillK); pIcons.f("uDay", day);
-            mUnit.draw();
+            for (G.Prog pi : pIcons) {
+                pi.use();
+                pi.m4("uP", Pp); pi.m4("uMV", MV);
+                pi.f("uW", pillLw); pi.f("uH", pillLh); pi.f("uPlay", play.x); pi.f("uProg", dur > 0 ? clamp(MS.pos() / (float) dur, 0, 1) : 0);
+                pi.f3("uPress", press[0].x, press[1].x, press[2].x); pi.f3("uHeart", heartVis.x, heartFill.x, press[3].x); pi.f("uBx", pillBx); pi.f("uHx", pillHx); pi.c3("uInk", ink); pi.c3("uAcc", pal.accent); pi.tex("uTime", 0, timeTex);
+                pi.f("uK", pillK); pi.f("uDay", day);
+                mUnit.draw();
+            }
         }
         // 光点
         boolean shP = !partVisible && shelf.partOn(); // 歌单进出的光点
         if (!refl && (partVisible || shP)) {
-            GLES30.glDisable(GLES30.GL_DEPTH_TEST);
+            G.depthTest(false);
             pPart.use();
             mvS(V);
             pPart.m4("uP", Pp); pPart.m4("uMV", MV);
@@ -1801,7 +1850,7 @@ final class Scene implements GLSurfaceView.Renderer {
         }
         if (!refl) shelf.drawPad(Pp); // 歌单的搜索键盘：最上面
         blendPremul(false);
-        GLES30.glDepthMask(true);
+        G.depthMask(true);
     }
 
     private void drawLine(LineObj o, float[] V, float[] lm) {
