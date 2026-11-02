@@ -25,12 +25,30 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * 新手引导（同 pet、demo3d 的写法，只有一步）：画面压暗，封面那块亮着、外面一圈呼吸光，旁边一个说明气泡：点一下封面打开歌单（没有歌单时是暂停 / 播放）、左右划换歌。
- * 点哪里、点"知道了"、点右上角关闭都算看过（done）。亮框跟着封面走（场景交来封面在画面上的范围），第一次交来才淡入。
- * 气泡放在封面右边，放不下放下面，再放不下放上面；箭头指着封面。深浅色跟着场景
+ * 新手引导（同 pet、demo3d 的写法）：画面压暗，这一步要讲的东西那块亮着、外面一圈呼吸光，旁边一个说明气泡。步骤（外面挑要讲的几步交进来）：
+ * COVER 封面（点一下打开歌单、左右划换歌）、LIBRARY 歌名左边的音源图标（点了打开曲库、搜歌）。
+ * 点哪里、点"下一步 / 知道了"都是下一步，最后一步完了收起；右上角关闭、返回键 = 剩下的都跳过。每一步过了叫 seen（收起来不算）。
+ * 亮框跟着要讲的东西走（每一步开始叫 show，外面把它在画面上的范围交进来），第一次交来才淡入；换一步时亮框平滑挪过去、气泡重新浮上来。
+ * 气泡放在亮框右边，放不下放下面，再放不下放上面；箭头指着亮框。深浅色跟着场景
  */
 @SuppressLint("ViewConstructor")
 final class Guide extends FrameLayout {
+    static final int COVER = 0, LIBRARY = 1;
+
+    interface Steps {
+        void show(int id); // 这一步开始：把要亮的东西在画面上的范围交进来（hole）
+        void seen(int id); // 这一步看过了
+    }
+
+    private static final String[] TITLES = { "封面能点，也能划", "曲库在这里" };
+    private static final String[][][] LINES = {
+        { { "点一下", "：打开整个歌单，点正在放的那块回到歌词（没有歌单时是暂停 / 播放）" }, { "左右划", "：上一首 / 下一首" } },
+        { { "点一下", "：打开曲库，切换音源，放我喜欢、每日推荐，按歌手、风格、语种、心情换一批歌" }, { "搜歌", "：曲库里的第一块，打拼音就能搜在线音乐里的歌，点哪首放哪首" } },
+    };
+
+    private final int[] ids;
+    private final Steps cb;
+    private int cur;
     private final Runnable done;
     private final LinearLayout tip;
     private final TextView label, title, text, ok;
@@ -39,17 +57,19 @@ final class Guide extends FrameLayout {
     private final Paint mask = new Paint(Paint.ANTI_ALIAS_FLAG), edge = new Paint(Paint.ANTI_ALIAS_FLAG), ring = new Paint(Paint.ANTI_ALIAS_FLAG),
         arrow = new Paint(Paint.ANTI_ALIAS_FLAG), arrowLine = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
-    private final RectF hole = new RectF(), tmp = new RectF();
+    private final RectF hole = new RectF(), holeFrom = new RectF(), holeTo = new RectF(), tmp = new RectF();
     private final ValueAnimator pulse = ValueAnimator.ofFloat(0, 1);
     private final PathInterpolator ease = new PathInterpolator(0.2f, 0.8f, 0.2f, 1f);
-    private boolean has, day, closing;
-    private float rem = 10, pk, ax, ay, tx, ty, enter;
+    private boolean has, day, closing, moveHole;
+    private float rem = 10, pk, ax, ay, tx, ty, enter, mk = 1; // mk：换一步时亮框从 holeFrom 挪到 holeTo 走了多少
     private int w = 1, h = 1, side; // side：气泡在封面的 0 右边、1 下面、2 上面
     private int ink, mute, acc, top, bottom, lineC, xBg, okBg, okInk;
 
-    Guide(Context c, boolean day, Runnable done) {
+    Guide(Context c, boolean day, int[] ids, Steps cb, Runnable done) {
         super(c);
         this.day = day;
+        this.ids = ids;
+        this.cb = cb;
         this.done = done;
         setWillNotDraw(false);
         setClickable(true);
@@ -62,7 +82,6 @@ final class Guide extends FrameLayout {
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         label = new TextView(c);
-        label.setText("新手引导");
         label.setLetterSpacing(0.18f);
         head.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         x = new ImageView(c);
@@ -72,7 +91,6 @@ final class Guide extends FrameLayout {
         head.addView(x);
         tip.addView(head);
         title = new TextView(c);
-        title.setText("封面能点，也能划");
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setLetterSpacing(0.04f);
         tip.addView(title);
@@ -81,10 +99,9 @@ final class Guide extends FrameLayout {
         LinearLayout foot = new LinearLayout(c);
         foot.setGravity(Gravity.END);
         ok = new TextView(c);
-        ok.setText("知道了");
         ok.setTypeface(Typeface.DEFAULT_BOLD);
         ok.setGravity(Gravity.CENTER);
-        ok.setOnClickListener(v -> finish());
+        ok.setOnClickListener(v -> next());
         foot.addView(ok);
         tip.addView(foot);
         addView(tip, new LayoutParams(-2, -2));
@@ -107,29 +124,72 @@ final class Guide extends FrameLayout {
 
     void size(int nw, int nh, float r) { w = nw; h = nh; rem = r; style(); place(); }
 
-    /** 封面在画面上的范围（像素）：第一次交来时淡入 */
+    /** 从第一步开始（加进界面、定好尺寸以后） */
+    void start() { content(); cb.show(ids[cur]); }
+
+    /** 这一步要亮的东西在画面上的范围（像素）：第一次交来时淡入；换了一步后第一次交来时亮框挪过去 */
     void hole(float l, float t, float r, float b) {
         float pad = rem * 0.1f;
-        hole.set(l - pad, t - pad, r + pad, b + pad);
+        holeTo.set(l - pad, t - pad, r + pad, b + pad);
+        if (moveHole) {
+            moveHole = false;
+            holeFrom.set(hole);
+            mk = 0;
+            ValueAnimator m = ValueAnimator.ofFloat(0, 1);
+            m.setDuration(450);
+            m.setInterpolator(ease);
+            m.addUpdateListener(a -> { mk = (float) a.getAnimatedValue(); lerpHole(); place(); });
+            m.start();
+        } else if (mk >= 1) hole.set(holeTo);
         place();
         if (!has) {
             has = true;
             animate().alpha(1).setDuration(450).start();
-            ValueAnimator in = ValueAnimator.ofFloat(0, 1); // 气泡从下面一点浮上来
-            in.setDuration(450);
-            in.setInterpolator(ease);
-            in.addUpdateListener(a -> { enter = (float) a.getAnimatedValue(); applyPos(); });
-            in.start();
+            enterTip();
             pulse.start();
         }
+    }
+
+    private void lerpHole() {
+        float k = mk;
+        hole.set(holeFrom.left + (holeTo.left - holeFrom.left) * k, holeFrom.top + (holeTo.top - holeFrom.top) * k,
+            holeFrom.right + (holeTo.right - holeFrom.right) * k, holeFrom.bottom + (holeTo.bottom - holeFrom.bottom) * k);
+    }
+
+    /** 气泡从下面一点浮上来 */
+    private void enterTip() {
+        enter = 0;
+        ValueAnimator in = ValueAnimator.ofFloat(0, 1);
+        in.setDuration(450);
+        in.setInterpolator(ease);
+        in.addUpdateListener(a -> { enter = (float) a.getAnimatedValue(); applyPos(); });
+        in.start();
     }
 
     /** 收起来（不算看过） */
     void dismiss() { pulse.cancel(); animate().cancel(); if (getParent() != null) ((android.view.ViewGroup) getParent()).removeView(this); }
 
-    /** 看过了：淡出、拿掉，告诉外面 */
+    /** 下一步：这一步算看过，最后一步完了收起 */
+    private void next() {
+        if (closing || !has) return;
+        cb.seen(ids[cur]);
+        if (cur + 1 >= ids.length) { close(); return; }
+        cur++;
+        moveHole = true;
+        content();
+        cb.show(ids[cur]);
+        enterTip();
+    }
+
+    /** 跳过（右上角关闭、返回键）：剩下的都算看过 */
     void finish() {
         if (closing) return;
+        for (int i = cur; i < ids.length; i++) cb.seen(ids[i]);
+        close();
+    }
+
+    /** 淡出、拿掉，告诉外面 */
+    private void close() {
         closing = true;
         setClickable(false);
         done.run();
@@ -137,8 +197,8 @@ final class Guide extends FrameLayout {
     }
 
     @Override
-    public boolean onTouchEvent(MotionEvent e) { // 点哪里都算看过（手指抬起时）
-        if (e.getActionMasked() == MotionEvent.ACTION_UP && has) finish();
+    public boolean onTouchEvent(MotionEvent e) { // 点哪里都是下一步（手指抬起时）
+        if (e.getActionMasked() == MotionEvent.ACTION_UP) next();
         return true;
     }
 
@@ -170,9 +230,18 @@ final class Guide extends FrameLayout {
         invalidate();
     }
 
+    /** 这一步的字：第几步、标题、说明、按钮 */
+    private void content() {
+        label.setText(ids.length > 1 ? "新手引导  " + (cur + 1) + " / " + ids.length : "新手引导");
+        title.setText(TITLES[ids[cur]]);
+        text.setText(lines());
+        ok.setText(cur + 1 < ids.length ? "下一步" : "知道了");
+        place();
+    }
+
     /** 两行说明，动作那几个字用正文色加粗 */
     private CharSequence lines() {
-        String[][] ls = { { "点一下", "：打开整个歌单，点正在放的那块回到歌词（没有歌单时是暂停 / 播放）" }, { "左右划", "：上一首 / 下一首" } };
+        String[][] ls = LINES[ids[cur]];
         SpannableStringBuilder s = new SpannableStringBuilder();
         for (int i = 0; i < ls.length; i++) {
             if (i > 0) s.append('\n');
@@ -233,7 +302,7 @@ final class Guide extends FrameLayout {
         arrowLine.setStrokeWidth(1);
     }
 
-    /** 气泡摆在封面旁边：右边放得下放右边，不然下面，再不然上面；箭头的位置跟着算 */
+    /** 气泡摆在亮框旁边：右边放得下放右边，不然下面，再不然上面；箭头的位置跟着算 */
     private void place() {
         if (hole.isEmpty() || w <= 1) return;
         int tw = Math.min(px(4.8f), w - px(0.4f)), m = px(0.2f), gap = px(0.36f);

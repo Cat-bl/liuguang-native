@@ -143,7 +143,7 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     protected void onStop() {
         started = false;
         main.removeCallbacks(guideTry);
-        if (ui.guiding()) { ui.guideHide(); view.scene().trackCover(false); } // 没看完就收起来了：不算看过，下次再出
+        if (ui.guiding()) { ui.guideHide(); view.scene().guideTrack(Scene.GUIDE_OFF); } // 没看完就收起来了：没过的那几步不算看过，下次再出
         weatherWatch(false);
         host.background(); // 不马上断开：宿主的授权确认页会把这里盖住，授权申请挂在这个会话上
         bydMedia.stop();
@@ -884,19 +884,28 @@ public class MainActivity extends Activity implements Uiplus.Listener, Scene.Hos
     public void btnWait(final boolean w) { main.post(() -> { ui.setWait(w); if (!w) guideLater(1500); }); }
 
     @Override
-    public void coverAt(final float l, final float t, final float r, final float b) { main.post(() -> ui.guideHole(l, t, r, b)); }
+    public void guideAt(final float l, final float t, final float r, final float b) { main.post(() -> ui.guideHole(l, t, r, b)); }
 
-    // ================= 新手引导（一步：封面能点也能划；看过就不再出） =================
+    // ================= 新手引导（两步：封面能点也能划、曲库在歌名左边的音源图标；看过的那步不再出，存 guide、guideLib） =================
     private final Runnable guideTry = this::guideTry;
 
     private void guideLater(long ms) { main.removeCallbacks(guideTry); main.postDelayed(guideTry, ms); }
 
-    /** 开场走完、有歌在放、没开着面板和歌单时出 */
+    /** 开场走完、有歌在放、没开着设置页、曲库和歌单时出；曲库那步等歌名左边的音源图标出来（「多媒体」在放）才讲，看过封面那步的只补这一步 */
     private void guideTry() {
-        if (prefs.getBoolean("guide", false) || ui.guiding() || !started || slept || !ui.keysUp()) return;
-        if (prefsOn || ui.shelfOn() || info.covering() || !song.on) { guideLater(2000); return; }
-        view.scene().trackCover(true);
-        ui.showGuide(() -> { prefs.edit().putBoolean("guide", true).apply(); view.scene().trackCover(false); });
+        boolean cover = !prefs.getBoolean("guide", false), lib = !prefs.getBoolean("guideLib", false);
+        if (!cover && !lib || ui.guiding() || !started || slept || !ui.keysUp()) return;
+        if (prefsOn || libOn || ui.shelfOn() || info.covering() || !song.on) { guideLater(2000); return; }
+        lib = lib && view.scene().srcIconOn();
+        if (!cover && !lib) { guideLater(5000); return; }
+        int[] ids = cover && lib ? new int[] { Guide.COVER, Guide.LIBRARY } : cover ? new int[] { Guide.COVER } : new int[] { Guide.LIBRARY };
+        ui.showGuide(ids, new Guide.Steps() {
+            @Override public void show(int id) { view.scene().guideTrack(id == Guide.COVER ? Scene.GUIDE_COVER : Scene.GUIDE_SRC); }
+            @Override public void seen(int id) { prefs.edit().putBoolean(id == Guide.COVER ? "guide" : "guideLib", true).apply(); }
+        }, () -> {
+            view.scene().guideTrack(Scene.GUIDE_OFF);
+            if (!prefs.getBoolean("guideLib", false)) guideLater(5000); // 曲库那步还没讲（当时图标没出来）
+        });
     }
 
 }

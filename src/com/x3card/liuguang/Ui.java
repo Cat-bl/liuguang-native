@@ -78,20 +78,21 @@ final class Ui extends FrameLayout {
     /** 换了一块画布（场景重建）：键的状态再交一次 */
     void pushKeys() { fade(); }
 
-    /** 新手引导（Guide）：看过了叫 done（收起来不算） */
-    void showGuide(Runnable done) {
+    /** 新手引导（Guide）：讲 ids 这几步（Guide.COVER / LIBRARY），每步过了叫 steps.seen；讲完、跳过了叫 end（收起来不叫） */
+    void showGuide(int[] ids, Guide.Steps steps, Runnable end) {
         if (guide != null) return;
-        guide = new Guide(getContext(), day, () -> { guide = null; done.run(); });
+        guide = new Guide(getContext(), day, ids, steps, () -> { guide = null; end.run(); });
         addView(guide, new LayoutParams(-1, -1));
         guide.size(w, h, rem);
+        guide.start();
     }
 
     boolean guiding() { return guide != null; }
 
-    /** 封面在画面上的范围（占画面的比例） */
+    /** 这一步亮着的东西在画面上的范围（占画面的比例） */
     void guideHole(float l, float t, float r, float b) { if (guide != null) guide.hole(l * w, t * h, r * w, b * h); }
 
-    /** 返回键：算看过 */
+    /** 返回键：剩下的都跳过（算看过） */
     void guideOk() { if (guide != null) guide.finish(); }
 
     /** 应用藏起来了：收起来，不算看过 */
