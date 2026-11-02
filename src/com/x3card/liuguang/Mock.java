@@ -45,7 +45,8 @@ final class Mock {
 
     private final File dir;
     private final Handler main = new Handler(Looper.getMainLooper());
-    final List<BydMedia.Song> songs;
+    private final List<BydMedia.Song> all; // 录到的整个队列（认封面用）
+    private List<BydMedia.Song> songs; // 现在的播放队列（曲库换一批歌会换掉）
     private final Map<String, String> coverKey = new HashMap<>(); // 歌单里的封面网址 → 本地文件名
     private final Map<String, Boolean> fav = new HashMap<>();
     private int cur;
@@ -67,7 +68,7 @@ final class Mock {
             list.add(new BydMedia.Song(id, o.optString("title").trim(), o.optString("artist").trim(), o.optString("coverUrl").trim(), o.optLong("duration")));
             fav.put(id, o.optBoolean("isFavorite"));
         }
-        songs = Collections.unmodifiableList(list);
+        songs = all = Collections.unmodifiableList(list);
         File idx = new File(dir, "covers/index.json");
         if (idx.isFile()) { JSONObject m = new JSONObject(read(idx)); for (java.util.Iterator<String> it = m.keys(); it.hasNext(); ) { String k = it.next(); coverKey.put(k, m.getString(k)); } }
         cur = 0;
@@ -107,6 +108,7 @@ final class Mock {
     private JSONObject snapshot() {
         JSONObject o = new JSONObject();
         try {
+            if (songs.isEmpty()) return o.put("status", "ok").put("packageName", "com.byd.mediacenter").put("playing", false).put("title", "").put("updatedAt", System.currentTimeMillis());
             BydMedia.Song s = song();
             o.put("status", "ok").put("trackId", s.id).put("title", s.title).put("artist", s.artist).put("packageName", "com.byd.mediacenter")
                 .put("durationMs", s.dur).put("positionMs", snapPos).put("playing", playing)
@@ -125,21 +127,23 @@ final class Mock {
         main.post(() -> {
             JSONObject res = new JSONObject();
             try {
+                boolean none = songs.isEmpty(); // 这个音源没有歌：播放控制什么都不做
                 switch (method) {
                     case "media.subscribe": mediaSub = params == null ? null : params.optString("subscriptionId", null); break;
                     case "media.get": res = snapshot(); break;
                     case "media.getLyrics": {
+                        if (none) break;
                         JSONArray a = new JSONArray();
                         for (Ln l : lines) a.put(new JSONObject().put("text", l.t).put("timeMs", l.at));
                         res.put("trackId", song().id).put("lines", a);
                         break;
                     }
                     case "capabilities": res.put("fields", new JSONArray()); break; // 没有日夜模式：按钟点
-                    case "media.togglePlayPause": setPlaying(!playing); break;
-                    case "media.play": setPlaying(true); break;
-                    case "media.pause": setPlaying(false); break;
-                    case "media.next": track((cur + 1) % songs.size(), 300); break;
-                    case "media.previous": track((cur - 1 + songs.size()) % songs.size(), 300); break;
+                    case "media.togglePlayPause": if (!none) setPlaying(!playing); break;
+                    case "media.play": if (!none) setPlaying(true); break;
+                    case "media.pause": if (!none) setPlaying(false); break;
+                    case "media.next": if (!none) track((cur + 1) % songs.size(), 300); break;
+                    case "media.previous": if (!none) track((cur - 1 + songs.size()) % songs.size(), 300); break;
                     case "vehicle.subscribe": case "authorization.request": break;
                     default: if (r != null) r.done(null, "UNSUPPORTED", "模拟数据没有 " + method); return;
                 }
@@ -155,20 +159,94 @@ final class Mock {
         File f = new File(dir, "art/" + id + ".png");
         if (!f.isFile()) {
             String key = null;
-            for (BydMedia.Song s : songs) if (s.id.equals(id)) { key = coverKey.get(s.cover); break; }
+            for (BydMedia.Song s : all) if (s.id.equals(id)) { key = coverKey.get(s.cover); break; }
             if (key != null) for (String sz : new String[] { "500", "300", "120" }) { f = new File(dir, "covers/" + sz + "/" + key + ".jpg"); if (f.isFile()) break; }
         }
         try { return f.isFile() ? ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY) : null; } catch (Exception e) { return null; }
     }
 
     // ================= 车机媒体控制器那头（BydMedia 转过来） =================
+    private static final int[] SOURCES = { 10, 12, 5, 6, 7, 8, 4, 2, 3, 1 }; // 车上录到的音源列表
+    private static final String[] SRC_NAME = { "", "本地音乐", "U盘", "SD卡", "蓝牙音乐", "酷狗音乐", "酷我音乐", "喜马拉雅", "云听", "收音机", "QQ音乐", "", "网易云音乐" };
+    private int src = 10, mode = 1; // 车上录的时候：QQ 音乐、随机播放
+
     void attachByd(BydMedia b) {
         byd = b;
         if (b == null) return;
-        main.post(() -> { if (byd != null) { byd.onList(songs, cur); meta(); } });
+        main.post(() -> {
+            if (byd == null) return;
+            byd.onSources(SOURCES);
+            byd.onIcons(icons());
+            byd.onSource("com.byd.mediacenter", src, SRC_NAME[src]);
+            byd.onList(songs, cur);
+            meta();
+        });
     }
 
-    private void meta() { if (byd != null) byd.onMetadata(song().title, song().id, fav.get(song().id), null, song().artist, song().dur); }
+    /** 车上录到的音源图标：icons/0xx-srcicon-<音源号>.png */
+    private android.util.SparseArray<android.graphics.Bitmap> icons() {
+        android.util.SparseArray<android.graphics.Bitmap> m = new android.util.SparseArray<>();
+        File[] fs = new File(dir, "icons").listFiles();
+        if (fs != null) for (File f : fs) {
+            java.util.regex.Matcher x = java.util.regex.Pattern.compile("srcicon-(\\d+)\\.png$").matcher(f.getName());
+            if (!x.find()) continue;
+            android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeFile(f.getPath());
+            if (bm != null) m.put(Integer.parseInt(x.group(1)), bm);
+        }
+        return m;
+    }
+
+    private void meta() {
+        if (byd == null) return;
+        if (songs.isEmpty()) { byd.onMetadata("", null, null, null, "", 0, -1); return; }
+        byd.onMetadata(song().title, song().id, fav.get(song().id), null, song().artist, song().dur, mode);
+    }
+
+    void playMode(final int m) { main.postDelayed(() -> { mode = m; meta(); }, 300); }
+
+    /** 切音源：QQ 音乐回到录到的队列；蓝牙、本地这类没有歌；别的在线音源随便挑一批 */
+    void changeSource(final int s) {
+        main.postDelayed(() -> {
+            src = s;
+            if (byd != null) byd.onSource("com.byd.mediacenter", s, s < SRC_NAME.length ? SRC_NAME[s] : "");
+            if (s == 10) newQueue(all);
+            else if (s == 1 || s == 2 || s == 3 || s == 4 || s == 9) newQueue(Collections.<BydMedia.Song>emptyList());
+            else newQueue(pick("src" + s, 40));
+        }, 500);
+    }
+
+    /** 曲库发给「多媒体」语音入口的命令：演成换一批歌（搜不到的、没有的就什么都不推，同车上） */
+    void voice(String method, JSONObject p) {
+        List<BydMedia.Song> q = null;
+        if ("playFavorite".equals(method)) {
+            q = new ArrayList<>();
+            for (BydMedia.Song s : all) if (Boolean.TRUE.equals(fav.get(s.id))) q.add(s);
+        } else if ("searchMusic".equals(method)) {
+            String artist = p == null ? "" : p.optString("artist");
+            if (!artist.isEmpty()) {
+                q = new ArrayList<>();
+                for (BydMedia.Song s : all) if (s.artist.contains(artist)) q.add(s);
+            } else q = pick(String.valueOf(p), 30);
+        } else if (method.startsWith("play")) q = pick(method, 50);
+        if (q == null || q.isEmpty()) return;
+        final List<BydMedia.Song> nq = q;
+        main.postDelayed(() -> newQueue(nq), 600);
+    }
+
+    /** 从录到的队列里按 seed 挑 n 首（同一个 seed 每次一样） */
+    private List<BydMedia.Song> pick(String seed, int n) {
+        List<BydMedia.Song> l = new ArrayList<>(all);
+        Collections.shuffle(l, new java.util.Random(seed.hashCode()));
+        return new ArrayList<>(l.subList(0, Math.min(n, l.size())));
+    }
+
+    private void newQueue(List<BydMedia.Song> q) {
+        songs = Collections.unmodifiableList(new ArrayList<>(q));
+        cur = 0;
+        if (byd != null) byd.onList(songs, songs.isEmpty() ? -1 : 0);
+        if (songs.isEmpty()) { playing = false; main.removeCallbacks(tick); push(); meta(); return; }
+        track(0, 0);
+    }
 
     // ================= 「多媒体」那几样（Player 转过来） =================
     void playIndex(int i) { if (i >= 0 && i < songs.size()) track(i, 600); }
@@ -219,6 +297,7 @@ final class Mock {
     }
 
     private void onTick() {
+        if (songs.isEmpty()) return;
         long p = pos();
         if (song().dur > 0 && p >= song().dur - 20) { track((cur + 1) % songs.size(), 0); return; }
         int k = lineAt(p);

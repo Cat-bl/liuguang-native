@@ -18,7 +18,11 @@ final class Res {
         return map;
     }
 
+    /** 设置里选了"清晰优先"：一直按原尺寸画（主线程按设置改） */
+    static volatile boolean sharp;
+
     static synchronized float recall(Context c, String key) {
+        if (sharp) return 1;
         double k = map(c).optDouble(key, 1);
         return k >= 0.5 && k <= 1 ? (float) k : 1;
     }

@@ -8,7 +8,7 @@ import java.util.Locale;
 
 /**
  * 歌单搜索：每首的歌名、歌手转成拉丁字母（安卓自带的 ICU 转写：汉字转拼音、假名和韩文转罗马字），
- * 按拼音首字母（qlx → 七里香）、全拼（qili）、英文单词首字母或开头、数字匹配。
+ * 按拼音首字母（qlx → 七里香）、全拼（qili）、英文单词首字母或开头、数字匹配；键盘上选了汉字的，汉字按原样匹配。
  * 建索引在后台线程（几百首零点几秒），匹配在 GL 线程（每打一个字母一次，几百首不到一毫秒）
  */
 final class SongIndex {
@@ -69,16 +69,42 @@ final class SongIndex {
         }
     }
 
-    /** 搜 q（小写字母数字）：返回搜到的歌在歌单里的序号，好的在前（歌名开头 > 歌手开头 > 歌名中间 > 歌手中间，一样好的按歌单顺序） */
-    int[] match(String q) {
+    /** 第 i 首对 q（小写字母数字）有多好：0 歌名开头、1 歌手开头、2 歌名中间、3 歌手中间，-1 对不上 */
+    private int score(int i, String q) {
+        return tInit[i].startsWith(q) || tFull[i].startsWith(q) ? 0
+            : aInit[i].startsWith(q) || aFull[i].startsWith(q) ? 1
+            : tInit[i].contains(q) || tFull[i].contains(q) ? 2
+            : aInit[i].contains(q) || aFull[i].contains(q) ? 3 : -1;
+    }
+
+    /**
+     * 按键盘上打的搜（Keyboard）：text 是上屏的字，里面的汉字（和别的非英文字）要原样出现在歌名或歌手里；
+     * keys 为真（还有在打的拼音、英文）时，full（上屏的字换成拼音接上在打的拼音）或 init（汉字只取首字母）还要对得上，按对得上的程度排；
+     * 只有汉字时按它出现在哪排。返回搜到的歌在歌单里的序号，好的在前（一样好的按歌单顺序）
+     */
+    int[] match(String text, String full, String init, boolean keys) {
+        List<String> lit = new java.util.ArrayList<>();
+        for (int i = 0, n = text.length(); i < n; ) {
+            if (text.charAt(i) <= 0x7f) { i++; continue; }
+            int j = i;
+            while (j < n && text.charAt(j) > 0x7f) j++;
+            lit.add(text.substring(i, j));
+            i = j;
+        }
         int n = tInit.length;
         int[] score = new int[n];
         int m = 0;
         for (int i = 0; i < n; i++) {
-            int sc = tInit[i].startsWith(q) || tFull[i].startsWith(q) ? 0
-                : aInit[i].startsWith(q) || aFull[i].startsWith(q) ? 1
-                : tInit[i].contains(q) || tFull[i].contains(q) ? 2
-                : aInit[i].contains(q) || aFull[i].contains(q) ? 3 : -1;
+            String t = songs.get(i).title, a = songs.get(i).artist;
+            int sc = keys || !lit.isEmpty() ? 0 : -1;
+            for (String h : lit) if (!t.contains(h) && !a.contains(h)) { sc = -1; break; }
+            if (sc >= 0 && keys) {
+                int x = score(i, full), y = init.equals(full) ? -1 : score(i, init);
+                sc = x < 0 ? y : y < 0 ? x : Math.min(x, y);
+            } else if (sc >= 0) {
+                String h = lit.get(0);
+                sc = t.startsWith(h) ? 0 : a.startsWith(h) ? 1 : t.contains(h) ? 2 : 3;
+            }
             score[i] = sc;
             if (sc >= 0) m++;
         }

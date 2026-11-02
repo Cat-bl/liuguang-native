@@ -105,9 +105,10 @@ export async function build({ SRC, OUT, APK_DIR, KS, ASSETS, prepare, noCompress
   // 2. Java → class（按 Java 8 编译，只链接 android.jar；lambda 要的 LambdaMetafactory 在 build-tools 的 core-lambda-stubs.jar 里，d8 再把它脱糖）
   const java = files(path.join(SRC, 'src'), '.java').concat(files(path.join(OUT, 'gen'), '.java'));
   run(bin('javac'), ['-encoding', 'UTF-8', '-source', '8', '-target', '8', '-bootclasspath', JAR + path.delimiter + path.join(BT, 'core-lambda-stubs.jar'), '-Xlint:-options', '-d', path.join(OUT, 'classes')].concat(java));
-  // 3. class → dex
-  run(bin('java'), ['-cp', path.join(BT, 'lib', 'd8.jar'), 'com.android.tools.r8.D8', '--release', '--min-api', '28', '--lib', JAR, '--output', path.join(OUT, 'dex')]
-    .concat(files(path.join(OUT, 'classes'), '.class')));
+  // 3. class → dex（先打成一个 jar 再交给 d8：class 文件多、目录深时一个个列在命令行上会超过 Windows 的长度限制）
+  const classesJar = path.join(OUT, 'classes.jar');
+  run(bin('jar'), ['cf', classesJar, '-C', path.join(OUT, 'classes'), '.']);
+  run(bin('java'), ['-cp', path.join(BT, 'lib', 'd8.jar'), 'com.android.tools.r8.D8', '--release', '--min-api', '28', '--lib', JAR, '--output', path.join(OUT, 'dex'), classesJar]);
   // 4. dex 放进 APK（aapt add 按相对路径放，所以在 dex 目录里执行）
   run(bt('aapt'), ['add', path.join('..', 'base.apk'), 'classes.dex'], { cwd: path.join(OUT, 'dex') });
   // 原生库同样按相对路径放（APK 里的路径要正斜杠，所以自己拼，不用 path.join）

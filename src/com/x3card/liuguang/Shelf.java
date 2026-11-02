@@ -27,7 +27,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *   点刻度条上发光的点、或者旁边的"正在放"回到正在放的那首（按距离定时长，快的时候砖是空玻璃一闪而过）。
  * - 点中间那块放它；点侧面那块：滑到中间并直接放；点正在放的那块：回到歌词。水面上那道光马上挪过去（闪着），车机确认换好歌了就稳住。
  * - 中间那块停下来：天空（极光、背景封面、高亮色）换成这首封面的颜色；回到正在放的那首、或者回歌词时换回来。
- * - 搜索：点刻度条左头的放大镜，键盘（SearchPad）从底下滑上来，按拼音首字母 / 全拼 / 英文搜（SongIndex），边打边筛：
+ * - 曲库：刻度条右头的键打开（Library）；曲库开着时长廊沉在水下（hideK），曲库关了浮回来。
+ * - 搜索：点刻度条左头的放大镜，全局的键盘（Scene.kb）从底下滑上来，按拼音首字母 / 全拼 / 英文、选上屏的汉字搜（SongIndex），边打边筛：
  *   长廊里只排搜到的歌（view），留下的砖从原来的位置滑到新位置，没搜中的缩小沉下去；砖那一行缩小一点往上让开键盘。
  *   点一首放它、收起键盘回到整个歌单，停在刚才那首上。
  * 省：封面放在一张 2048×1024 的图集里（32 格，每格 256 连同 128 / 64 / 32 三级缩小图，后台线程缩好按格上传，不用整张重新生成缩小图），
@@ -37,10 +38,13 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 final class Shelf {
     private final Scene sc;
-    private final SearchPad pad;
+    private final Keyboard.Owner kbo = new Keyboard.Owner() {
+        @Override public void changed() { applyQuery(sc.clock); }
+        @Override public void hide() { closeSearch(sc.clock); }
+    };
     volatile SongCovers art;
 
-    Shelf(Scene sc) { this.sc = sc; pad = new SearchPad(sc); }
+    Shelf(Scene sc) { this.sc = sc; }
 
     // ================= 主线程交进来的 =================
     private static final class In { final List<BydMedia.Song> songs; final int cur; In(List<BydMedia.Song> s, int c) { songs = s; cur = c; } }
@@ -65,6 +69,16 @@ final class Shelf {
     /** 歌单开着、或者还在开 / 关的路上（这时场景的封面砖、控制条、歌词交给这里） */
     boolean engaged() { return want || p > 0; }
 
+    /** 曲库盖在上面多少（场景每帧给）：刻度条和歌名淡掉按 hideK（0～1），砖沉进水里按 sinkK（浮上来时冲过一点，会小于 0） */
+    float hideK, sinkK;
+
+    /** 砖的姿态（x, y, z, rx, ry, rz, 大小）按 sinkK 沉下去 */
+    private void sink(float[] o) {
+        if (sinkK == 0) return;
+        o[1] -= sinkK * (o[1] - yC + Cf * 1.6f);
+        o[6] *= 1 - 0.3f * sinkK;
+    }
+
     private static float clamp(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
     private static float smooth(float a, float b, float v) { float t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
     private static float mix(float a, float b, float t) { return a + (b - a) * t; }
@@ -78,7 +92,7 @@ final class Shelf {
     /** 竖屏时歌名往左挪多少（封面走了） */
     float titleK() { return p <= 0 ? 0 : smooth(0.15f, 0.7f, p); }
     /** 键盘开着多少（控制条沉下去） */
-    float searchK() { return pad.k.x; }
+    float searchK() { return sc.kb.k(kbo); }
 
     // 光点（场景画）：歌词散成光点流进 hero 砖（起点按 hero 砖的姿态换算，砖在飞也跟得上），出的时候倒着走
     boolean partAimed;
@@ -188,7 +202,7 @@ final class Shelf {
                 partAimed = sc.shelfAim(0, yC, zC, Cf);
             }
         } else {
-            if (pad.isOpen() || view != null) closeSearch(sc.clock);
+            if (sc.kb.isOpen(kbo) || view != null) closeSearch(sc.clock);
             if (p == 1) { // 从歌单开始：点的那块（正在放的）或者中间那块当 hero（不是正在放的就边飞边翻到正在放的封面）
                 tw = false;
                 hero = closeFrom >= 0 ? closeFrom : focus();
@@ -203,24 +217,21 @@ final class Shelf {
     }
 
     // ================= 搜索 =================
-    private String query = "";
+    private static final String HINT = "打拼音，比如 qilixiang、qlx（七里香）";
     private SongIndex index;
     private volatile SongIndex built;
     private boolean indexing;
 
     private void openSearch() {
-        if (pad.isOpen()) return;
-        query = "";
-        pad.open();
-        pad.setText("", "");
+        if (sc.kb.isOpen(kbo)) return;
+        sc.kb.open(kbo, HINT);
         ensureIndex();
         tw = false;
     }
 
     /** 收起键盘：回到整个歌单，停在现在这首上 */
     private void closeSearch(float time) {
-        pad.close();
-        query = "";
+        if (sc.kb.isOpen(kbo)) sc.kb.close();
         if (view != null) setView(null, time);
     }
 
@@ -230,20 +241,13 @@ final class Shelf {
         SongIndex.build(songs, x -> { built = x; sc.wake(); });
     }
 
-    private void key(char c, float time) {
-        if (c == SearchPad.HIDE) { closeSearch(time); return; }
-        if (c == SearchPad.BACK) { if (!query.isEmpty()) query = query.substring(0, query.length() - 1); }
-        else if (c == SearchPad.CLEAR) query = "";
-        else if (query.length() < 24) query += c;
-        applyQuery(time);
-    }
-
     private void applyQuery(float time) {
-        if (query.isEmpty()) { if (view != null) setView(null, time); pad.setText("", ""); return; }
-        if (index == null || index.songs != songs) { pad.setText(query, "…"); ensureIndex(); return; } // 索引好了再筛
-        int[] r = index.match(query);
+        Keyboard kb = sc.kb;
+        if (kb.text().trim().isEmpty() && !kb.composing()) { if (view != null) setView(null, time); kb.setInfo(kbo, ""); return; }
+        if (index == null || index.songs != songs) { kb.setInfo(kbo, "…"); ensureIndex(); return; } // 索引好了再筛
+        int[] r = index.match(kb.text(), kb.keyFull(), kb.keyInit(), kb.lettered());
         setView(r, time);
-        pad.setText(query, r.length == 0 ? "没有找到" : "找到 " + r.length + " 首");
+        kb.setInfo(kbo, r.length == 0 ? "没有找到" : "找到 " + r.length + " 首");
     }
 
     // ================= 每帧 =================
@@ -255,7 +259,7 @@ final class Shelf {
         int r = req;
         if (r != 0) {
             req = 0;
-            if (r == 4) { if (pad.isOpen()) closeSearch(sc.clock); else setWant(false); }
+            if (r == 4) { if (sc.kb.isOpen(kbo)) closeSearch(sc.clock); else setWant(false); }
             else setWant(r == 1 || (r == 3 && !want));
         }
         if (locateReq) { locateReq = false; int pk = vk(playing); if (want && pk >= 0) tweenTo(pk); }
@@ -282,7 +286,7 @@ final class Shelf {
         if (!same && view != null) { view = null; kOf = new int[0]; }
         vn = view == null ? n : view.length;
         if (posS.x > vn - 1 || posS.t > vn - 1) { tw = false; posS.set(Math.max(0, vn - 1)); }
-        if (pad.isOpen()) ensureIndex();
+        if (sc.kb.isOpen(kbo)) ensureIndex();
     }
 
     private final float[] tmpA = new float[7], tmpB = new float[7], tmpC = new float[7];
@@ -295,9 +299,8 @@ final class Shelf {
         boolean moving = p < 1 || want != (p == 1);
         drain(time);
         SongIndex b = built;
-        if (b != null) { built = null; indexing = false; index = b; if (b.songs != songs) ensureIndex(); else if (pad.isOpen() && !query.isEmpty()) applyQuery(time); }
-        if (pad.tick(dt)) moving = true;
-        float sk = pad.k.x;
+        if (b != null) { built = null; indexing = false; index = b; if (b.songs != songs) ensureIndex(); else if (sc.kb.isOpen(kbo)) applyQuery(time); }
+        float sk = sc.kb.k(kbo);
         fitRow();
         rs = mix(1, rsK, sk);
         yR = mix(yC, yK, sk);
@@ -329,7 +332,7 @@ final class Shelf {
     /** 键盘开着时砖那一行缩多小、放多高：歌名在键盘上面、砖的上沿不出画面（窗口矮的时候缩得多） */
     private void fitRow() {
         float H = sc.H, fz = sc.dpx / (sc.dpx - zC);
-        float bottom = pad.top() + H * 0.025f + H * 0.115f + H * 0.015f; // 键盘上沿、空一点、歌名两行、空一点：砖的下沿（画面上）
+        float bottom = sc.kb.top() + H * 0.025f + H * 0.115f + H * 0.015f; // 键盘上沿、空一点、歌名两行、空一点：砖的下沿（画面上）
         float top = sc.narrow ? sc.aY - sc.aF * 0.7f - H * 0.02f : H * 0.5f - H * 0.035f; // 竖屏窄：顶上一整排是正在放的歌名，到它下面为止；横屏到画面上沿（左上角的歌名这时淡掉）
         float room = top - bottom;
         rsK = clamp(room / (Cf * fz), 0.5f, 0.84f);
@@ -365,6 +368,7 @@ final class Shelf {
             float[] cp = sc.cvPose;
             for (int k = 0; k < 7; k++) tmpA[k] = mix(cp[k], tmpB[k], heroK);
             if (heroFlip) tmpA[4] += (float) Math.PI * (1 - smooth(0.2f, 0.7f, p));
+            sink(tmpA);
             Brick b = add(hero, hero, hero - pos);
             G.compose(b.m, tmpA[0], tmpA[1], tmpA[2], tmpA[3], tmpA[4], tmpA[5], tmpA[6], tmpA[6], tmpA[6]);
             System.arraycopy(b.m, 0, heroM, 0, 16);
@@ -416,6 +420,7 @@ final class Shelf {
             for (int q = 0; q < 7; q++) tmpB[q] = mix(tmpC[q], tmpB[q], fan);
         }
         if (st.vis < 1) { float v = easeOut(st.vis); tmpB[1] -= (1 - v) * tmpB[6] * 0.35f; tmpB[6] *= v; }
+        sink(tmpB);
         if (Math.abs(tmpB[0]) - tmpB[6] * 0.5f > sc.W * 0.75f || tmpB[6] < 0.5f) return true; // 跑出画面了
         Brick b = add(i, k, d);
         if (b == null) return false;
@@ -651,7 +656,10 @@ final class Shelf {
     }
 
     // ================= 中间那首的歌名、歌手（停下来、慢慢翻时才写，快的时候淡掉） =================
-    private static final class Lbl { int idx; int tt, ta; G.Mesh mt, ma; float th, ah; boolean now; final Spring k = new Spring(0, 160, 24, 0.002f); }
+    private static final class Lbl { int idx; String key; int tt, ta; G.Mesh mt, ma; float th, ah; boolean now; final Spring k = new Spring(0, 160, 24, 0.002f); }
+
+    /** 歌名标签认哪首：换了一份歌单时同一个位置可能是别的歌 */
+    private String lblKey(int i) { BydMedia.Song s = songs.get(i); return s.id + "|" + s.title + "|" + s.artist; }
     private Lbl lbl;
     private final List<Lbl> lblOld = new ArrayList<>();
     private float lblAt;
@@ -661,7 +669,7 @@ final class Shelf {
         boolean moving = false;
         int f = focusSong();
         boolean slow = spd < 5 || (g != null && g.scrub);
-        if (want && slow && f >= 0 && (lbl == null || lbl.idx != f || lbl.now != (f == playing)) && time - lblAt > 0.09f) {
+        if (want && slow && f >= 0 && (lbl == null || lbl.idx != f || lbl.now != (f == playing) || !lbl.key.equals(lblKey(f))) && time - lblAt > 0.09f) {
             lblAt = time;
             boolean scrub = g != null && g.scrub; // 拖刻度条：歌名直接换（不淡入淡出，不然一直在换、看不清）
             if (lbl != null) { if (scrub) freeLabel(lbl); else lblOld.add(lbl); }
@@ -683,6 +691,7 @@ final class Shelf {
         BydMedia.Song s = songs.get(i);
         Lbl o = new Lbl();
         o.idx = i;
+        o.key = lblKey(i);
         o.now = i == playing;
         float H = sc.H, maxW = Math.min(sc.W * 0.9f, Cf * 1.9f);
         Txt.Label t = Txt.label(s.title.isEmpty() ? "未知歌曲" : s.title, H * (sc.narrow ? 0.034f : 0.042f), maxW, true);
@@ -701,9 +710,9 @@ final class Shelf {
     private static String mmss(long ms) { long s = Math.max(0, ms / 1000); return s / 60 + ":" + (s % 60 < 10 ? "0" : "") + s % 60; }
 
     // ================= 刻度条：画在控制条那块玻璃上（按键淡掉后）：左头放大镜（点了搜索），中间一条线，白的是翻到哪了，亮色的点是正在放的；控制条够宽时写第几首 =================
-    private float sX0, sX1, sMx, sK;
+    private float sX0, sX1, sMx, sLx, sK;
     private boolean sCount;
-    private final Spring sPress = new Spring(1, 300, 18), magPress = new Spring(1, 300, 18);
+    private final Spring sPress = new Spring(1, 300, 18), magPress = new Spring(1, 300, 18), libPress = new Spring(1, 300, 18);
     private int countTex;
     private Bitmap countBmp;
     private String countText = "";
@@ -712,12 +721,14 @@ final class Shelf {
     private boolean scrubTick(float dt, float time) {
         boolean moving = sPress.step(dt);
         if (magPress.step(dt)) moving = true;
+        if (libPress.step(dt)) moving = true;
         float lw = sc.pillLw, lh = sc.pillLh;
         sCount = lw / lh >= 5.5f;
         sMx = -lw / 2 + lh * 0.55f;
+        sLx = lw / 2 - lh * 0.55f; // 右头：曲库
         sX0 = -lw / 2 + lh * (sCount ? 2.45f : 1.15f);
-        sX1 = lw / 2 - lh * 0.6f;
-        float k = smooth(0.5f, 0.92f, p);
+        sX1 = lw / 2 - lh * 1.15f;
+        float k = smooth(0.5f, 0.92f, p) * (1 - hideK);
         sK = k * sc.pillVis;
         int th = Math.max(16, Math.round(512 * lh / lw));
         if (countBmp == null || countBmp.getHeight() != th) { if (countBmp != null) countBmp.recycle(); countBmp = Bitmap.createBitmap(512, th, Bitmap.Config.ARGB_8888); G.free(countTex); countTex = 0; countText = ""; }
@@ -752,7 +763,7 @@ final class Shelf {
         boolean moving = lightI.step(dt);
         slot(lightI.x - pos, tmpC);
         float pulse = pendPlay >= 0 ? 0.55f + 0.45f * (float) Math.sin(time * 7) : 0.86f + 0.14f * (float) Math.sin(time * 2.2f);
-        lightK = smooth(0.7f, 1, p) * pulse * (1 - pad.k.x);
+        lightK = smooth(0.7f, 1, p) * pulse * (1 - sc.kb.k(kbo)) * (1 - hideK);
         G.compose(lightM, tmpC[0], sc.water + 0.6f, tmpC[2] + Cf * 0.08f, (float) (-Math.PI / 2), 0, 0, tmpC[6] * 1.25f, Cf * 0.7f, 1);
         return moving || pendPlay >= 0;
     }
@@ -764,7 +775,7 @@ final class Shelf {
 
     private void locateTick() {
         int dir = 0, pk = vk(playing);
-        if (want && p > 0.95f && !pad.isOpen() && pk >= 0 && Math.abs(pk - pos) > N - 0.3f) dir = pk < pos ? -1 : 1;
+        if (want && p > 0.95f && hideK <= 0 && !sc.kb.isOpen(kbo) && pk >= 0 && Math.abs(pk - pos) > N - 0.3f) dir = pk < pos ? -1 : 1;
         float y = 0.5f;
         if (dir != 0) { // 砖的中间在画面上多高
             G.mul(PS, sc.P, sc.S);
@@ -818,10 +829,10 @@ final class Shelf {
         Matrix.translateM(t2, 0, 0, 0, -0.09f);
         for (int k = 0; k < nb; k++) {
             Brick b = bricks[k];
-            if (b.halo <= 0.01f) continue;
+            if (b.halo * (1 - hideK) <= 0.01f) continue;
             G.mul(hm, b.m, t2);
             sc.mv(V, hm);
-            ph.m4("uMV", sc.MV); ph.f("uK", b.halo * sc.haloK);
+            ph.m4("uMV", sc.MV); ph.f("uK", b.halo * sc.haloK * (1 - hideK));
             sc.mHalo.draw();
         }
     }
@@ -829,7 +840,7 @@ final class Shelf {
     /** 歌名、刻度条上的东西（主画面、倒影都画） */
     void drawText(float[] V, float[] Pp) {
         if (!engaged()) return;
-        float base = smooth(0.72f, 1, p);
+        float base = smooth(0.72f, 1, p) * (1 - hideK);
         G.Prog pt = sc.pText;
         G.depthTest(false);
         pt.use();
@@ -841,7 +852,7 @@ final class Shelf {
             pScrub.use();
             sc.mv(V, sc.iconsM);
             pScrub.m4("uP", Pp); pScrub.m4("uMV", sc.MV);
-            pScrub.f("uW", sc.pillLw); pScrub.f("uH", sc.pillLh); pScrub.f("uX0", sX0); pScrub.f("uX1", sX1); pScrub.f("uMx", sMx);
+            pScrub.f("uW", sc.pillLw); pScrub.f("uH", sc.pillLh); pScrub.f("uX0", sX0); pScrub.f("uX1", sX1); pScrub.f("uMx", sMx); pScrub.f("uLx", sLx); pScrub.f("uLib", libPress.x);
             pScrub.f("uPos", vn > 1 ? clamp(pos / (vn - 1), 0, 1) : 0);
             int pk = vk(playing);
             pScrub.f("uPlay", pk >= 0 && vn > 1 ? pk / (float) (vn - 1) : pk == 0 ? 0 : -1);
@@ -853,7 +864,6 @@ final class Shelf {
     }
 
     /** 键盘（场景最上面，只在主画面里） */
-    void drawPad(float[] Pp) { pad.draw(Pp); }
 
     private void drawLabel(Lbl o, float[] V, float base) {
         float a = o.k.x * base;
@@ -873,7 +883,7 @@ final class Shelf {
     }
 
     // ================= 着色器（GL 环境建好时） =================
-    private static final String F_SCRUB = "uniform float uW, uH, uX0, uX1, uMx, uPos, uPlay, uPress, uMag, uK, uDay; uniform vec3 uInk, uAcc; uniform sampler2D uCount; in vec2 vUv; out vec4 o;\n"
+    private static final String F_SCRUB = "uniform float uW, uH, uX0, uX1, uMx, uLx, uPos, uPlay, uPress, uMag, uLib, uK, uDay; uniform vec3 uInk, uAcc; uniform sampler2D uCount; in vec2 vUv; out vec4 o;\n"
         + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n"
         + "vec4 over(vec4 d, vec4 s) { return s + d * (1.0 - s.a); }\n"
         + "void main() {\n"
@@ -889,6 +899,9 @@ final class Shelf {
         + "  vec2 hd = m - vec2(r * 0.6, -r * 0.6); float ln = clamp(dot(hd, vec2(0.7071, -0.7071)), 0.0, r * 0.7);\n"
         + "  float handle = fill(length(hd - vec2(0.7071, -0.7071) * ln) - h * 0.03);\n"
         + "  float mag = max(ring, handle) * 0.9;\n"
+        + "  vec2 lq = (p - vec2(uLx, 0.0)) / uLib; float ls = h * 0.075, lg = h * 0.1;\n"
+        + "  float lb = length(max(abs(lq - sign(lq) * lg) - vec2(ls * 0.82), 0.0)) - ls * 0.18;\n"
+        + "  float lib = fill(lb) * 0.9;\n"
         + "  float ta = texture(uCount, vec2(vUv.x, 1.0 - vUv.y)).a * 0.7;\n"
         + "  vec3 accC = mix(uAcc, uAcc * 0.62, uDay);\n"
         + "  vec4 c = vec4(uInk * tr, tr);\n"
@@ -897,6 +910,7 @@ final class Shelf {
         + "  c = over(c, vec4(accC * dt, dt));\n"
         + "  c = over(c, vec4(uInk * ta, ta));\n"
         + "  c = over(c, vec4(uInk * mag, mag));\n"
+        + "  c = over(c, vec4(uInk * lib, lib));\n"
         + "  o = c * uK;\n"
         + "}";
     private static final String F_LIGHT = "uniform vec3 uCol; uniform float uK, uDay; in vec2 vUv; out vec4 o;\n"
@@ -913,7 +927,6 @@ final class Shelf {
     void initGL() {
         pScrub = new G.Prog(Scene.V_UV, F_SCRUB);
         pLight = new G.Prog(Scene.V_UV, F_LIGHT);
-        pad.initGL();
         atlas = 0;
         forgetSlots();
         hiOf.clear();
@@ -928,15 +941,15 @@ final class Shelf {
     }
 
     // ================= 手势 =================
-    private static final class Grab { float x, y, lx, vx, pos0, tx0, tx1; long t, lt; boolean drag, scrub, mag, pad, moved; }
+    private static final class Grab { float x, y, lx, vx, pos0, tx0, tx1; long t, lt; boolean drag, scrub, mag, lib, pad, moved; }
     private Grab g;
 
     boolean touching() { return g != null; }
 
     /** 这一下归不归歌单管：开着、按在键盘、封面那一行（连同底下的歌名）或者刻度条上 */
     boolean claims(float ex, float ey) {
-        if (!want || p < 0.6f || n == 0) return false;
-        if (pad.isOpen()) return pad.hit(ex, ey) || rowHit(ey);
+        if (!want || p < 0.6f || n == 0 || hideK > 0.01f) return false;
+        if (sc.kb.isOpen(kbo)) return sc.kb.hit(kbo, ex, ey) || rowHit(ey);
         return rowHit(ey) || scrubHit(ex, ey, null);
     }
 
@@ -954,17 +967,18 @@ final class Shelf {
     /** a：0 按下 / 1 移动 / 2 抬起 / 3 取消；ex、ey 画面上的位置（场景像素） */
     void touch(int a, float ex, float ey, long tms) {
         if (a == 0) {
-            if (!want || p < 0.6f || vn == 0 && !pad.isOpen()) return;
+            if (!want || p < 0.6f || vn == 0 && !sc.kb.isOpen(kbo)) return;
             Grab q = new Grab();
             q.x = q.lx = ex; q.y = ey; q.t = q.lt = tms;
-            q.pad = pad.isOpen() && pad.hit(ex, ey);
-            if (q.pad) { pad.down(ex, ey); g = q; return; }
+            q.pad = sc.kb.isOpen(kbo) && sc.kb.hit(kbo, ex, ey);
+            if (q.pad) { sc.kb.down(ex, ey); g = q; return; }
             tw = false;
             posS.set(pos); // 按住就停（同 iOS）
             q.pos0 = pos;
-            q.scrub = !pad.isOpen() && scrubHit(ex, ey, q);
+            q.scrub = !sc.kb.isOpen(kbo) && scrubHit(ex, ey, q);
             q.mag = q.scrub && scrubLocal(ex, q) < sX0 - sc.pillLh * 0.15f;
-            if (q.mag) magPress.t = 0.82f; else if (q.scrub) sPress.t = 1.25f;
+            q.lib = q.scrub && !q.mag && scrubLocal(ex, q) > sX1 + sc.pillLh * 0.15f;
+            if (q.mag) magPress.t = 0.82f; else if (q.lib) libPress.t = 0.82f; else if (q.scrub) sPress.t = 1.25f;
             g = q;
             return;
         }
@@ -972,15 +986,16 @@ final class Shelf {
         if (q == null) return;
         boolean cancel = a == 3;
         if (q.pad) {
-            if (a >= 2) { char c = pad.up(ex, ey, cancel); if (c != 0) key(c, sc.clock); g = null; }
+            if (a == 1) sc.kb.move(ex, ey);
+            else { sc.kb.up(ex, ey, cancel); g = null; }
             return;
         }
         if (a == 1) {
             float dx = ex - q.x, dtm = Math.max(1, tms - q.lt);
             q.vx = q.vx * 0.4f + (ex - q.lx) / dtm * 0.6f;
             q.lx = ex; q.lt = tms;
-            if (!q.moved && (Math.abs(dx) > 8 || Math.abs(ey - q.y) > 8)) { q.moved = true; magPress.t = 1; }
-            if (q.mag || vn == 0) return;
+            if (!q.moved && (Math.abs(dx) > 8 || Math.abs(ey - q.y) > 8)) { q.moved = true; magPress.t = 1; libPress.t = 1; }
+            if (q.mag || q.lib || vn == 0) return;
             if (q.scrub && q.moved) { q.drag = true; posS.set(scrubAt(ex, q) * Math.max(0, vn - 1)); }
             else if (q.moved) {
                 q.drag = true;
@@ -990,7 +1005,7 @@ final class Shelf {
             return;
         }
         if (!q.moved && !cancel && tms - q.t < 500) tap(ex, ey, q);
-        else if (q.scrub && vn > 0) posS.t = clamp(Math.round(posS.x), 0, vn - 1);
+        else if (q.scrub && !q.lib && vn > 0) posS.t = clamp(Math.round(posS.x), 0, vn - 1);
         else if (q.drag) {
             float v = cancel ? 0 : -q.vx * 1000 / itemPx; // 首 / 秒
             float target = clamp(Math.round(posS.x + v * 0.22f), 0, vn - 1); // 按速度算出停在第几首
@@ -999,11 +1014,13 @@ final class Shelf {
         }
         if (q.scrub) sPress.t = 1;
         if (q.mag) { magPress.t = 1; magPress.v += 3; }
+        if (q.lib) { libPress.t = 1; libPress.v += 3; }
         g = null;
     }
 
     private void tap(float ex, float ey, Grab q) {
         if (q.mag) { openSearch(); return; }
+        if (q.lib) { sc.lib.request(2); sc.wake(); return; }
         if (q.scrub) {
             if (vn == 0) return;
             float fr = scrubAt(ex, q), pk = vk(playing), pf = pk >= 0 && vn > 1 ? pk / (vn - 1) : -1;
@@ -1014,7 +1031,7 @@ final class Shelf {
         Brick b = brickAt(ex, ey);
         if (b == null) return;
         int i = b.i;
-        boolean searching = pad.isOpen();
+        boolean searching = sc.kb.isOpen(kbo);
         if (i == playing) { // 点正在放的：搜着时回到整个歌单停在它上面，不然回歌词（从它那里飞回去）
             if (searching) { tweenTo(b.k); closeSearch(sc.clock); }
             else { closeFrom = i; setWant(false); }
@@ -1057,7 +1074,7 @@ final class Shelf {
 
     /** 按在刻度条（控制条那块玻璃）上没有；q 不是 null 时记下线两头在画面上的位置 */
     private boolean scrubHit(float ex, float ey, Grab q) {
-        if (sK < 0.5f || pad.k.x > 0.3f) return false;
+        if (sK < 0.5f || sc.kb.k(kbo) > 0.3f) return false;
         G.mul(PS, sc.P, sc.S);
         G.mul(PM, PS, sc.pillM);
         if (q != null) {

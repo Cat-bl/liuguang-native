@@ -253,6 +253,11 @@ final class G {
     /** 跑道形（两头半圆）：w × h、每个半圆 seg 段 */
     static float[] stadium(float w, float h, int seg) {
         float r = h / 2, x = w / 2 - r;
+        if (x < r * 1e-3f) { // 正圆：两个半圆的头尾重合，去掉重复的点（挤出时零长的边会出缺口）
+            float[] o = new float[2 * seg * 2];
+            for (int i = 0; i < 2 * seg; i++) { float a = (float) (-Math.PI / 2 + Math.PI * i / seg); o[i * 2] = r * (float) Math.cos(a); o[i * 2 + 1] = r * (float) Math.sin(a); }
+            return o;
+        }
         float[] o = new float[2 * (seg + 1) * 2];
         int k = 0;
         for (int i = 0; i <= seg; i++) { float a = (float) (-Math.PI / 2 + Math.PI * i / seg); o[k++] = x + r * (float) Math.cos(a); o[k++] = r * (float) Math.sin(a); }

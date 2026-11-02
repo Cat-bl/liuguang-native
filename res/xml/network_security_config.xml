@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只有酷狗的搜歌接口走 http（它 https 的接口不认拼音，见 SongFinder）；别的一律 https -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">mobilecdn.kugou.com</domain>
+    </domain-config>
+</network-security-config>

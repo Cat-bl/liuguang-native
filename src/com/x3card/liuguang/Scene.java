@@ -35,9 +35,34 @@ final class Scene implements GLSurfaceView.Renderer {
         void shelfState(boolean open); // 歌单开了 / 关了（歌单键亮不亮、返回键关歌单）
         void locate(int dir, float y); // 正在放的那首跑出画面了：dir -1 在左边、1 在右边、0 不显示；y 是砖的中间在画面上多高（0～1）
         void coverAt(float l, float t, float r, float b); // 新手引导开着：封面在画面上的范围（占画面的比例）
+        void libPick(String method, String field, String value); // 曲库里点了一块：发给「多媒体」（method + 参数 field=value，没有参数时 field 是 null）
+        void libSource(int src);       // 曲库里点了一个音源（控制器的音源号）
+        void libraryState(boolean open); // 曲库开了 / 关了（返回键先关曲库）
+        void songSearch(String query, int page, int seq); // 曲库的搜歌：搜第 page 页（结果交回 songPage）
+        void imeOpen(); // 键盘打开了：读拼音词库，把播放队列里的歌名、歌手加进词库
+        void songPick(SongFinder.Hit hit); // 搜歌里点了一首：插放（结果交回 songResult）
+        void prefSet(String key, Object value); // 设置页里点了一块：改成这个值
+        void prefsState(boolean open);  // 设置页开了 / 关了（返回键先关设置页）
+        void palette(int accent, int deep); // 正在放的这首封面的强调色（夜里、白天；提示条跟着）
     }
 
+    final Keyboard kb = new Keyboard(this); // 全局共用的键盘：歌单搜索、找歌手、搜歌都用它
     final Shelf shelf = new Shelf(this);
+    final Library lib = new Library(this);
+    final SetPage setp = new SetPage(this);
+    final TopKeys keys = new TopKeys(this);
+
+    /** 主线程：右上角的键显不显示、全屏键是哪种（见 TopKeys） */
+    void setKeys(boolean show, String fs) { keys.set(show, fs); }
+
+    /** 主线程：现在的设置（设置页的砖跟着）；设置页 1 打开、2 直接开着（换了画布）、3 关上 */
+    void setPrefs(SetPage.Data d) { setp.setData(d); wake(); }
+    void prefs(int r) { setp.request(r); wake(); }
+
+    /** 曲库、设置页（整页盖住歌词页的）开着多少：右上角的键等它差不多退完了再出来 */
+    float pageQ() { return Math.max(lib.q, setp.q); }
+
+    private boolean pages() { return lib.engaged() || setp.engaged(); }
 
     final Canvas3D view;
     final boolean vkView; // Vulkan 画布
@@ -69,7 +94,19 @@ final class Scene implements GLSurfaceView.Renderer {
     void setDay(boolean d) { dayWanted = d; DAY.t = d ? 1 : 0; wake(); }
     /** 车机「多媒体」的播放队列和正在放的是第几首（BydMedia） */
     void setSongs(List<BydMedia.Song> s, int cur) { shelf.setSongs(s, cur); wake(); }
-    void setCovers(SongCovers c) { shelf.art = c; }
+    void setCovers(SongCovers c) { shelf.art = c; lib.art = c; }
+    /** 曲库要的：音源、图标、攒的歌手（BydMedia、ArtistBook）；歌名旁的音源图标也用这里的图标 */
+    void setLib(Library.Data d) { libData = d; lib.setData(d); wake(); }
+    /** 曲库：1 从歌词页打开、2 从长廊打开、3 关上、4 返回（先收键盘） */
+    void library(int r) { lib.request(r); wake(); }
+    /** 曲库发出去的命令：1 换好了（新的播放队列到了）、2 没换成 */
+    void libResult(int r) { lib.result(r); wake(); }
+    /** 搜歌搜回来的一页 */
+    void songPage(SongFinder.Page p) { lib.songPage(p); wake(); }
+    /** 搜歌打拼音时的联想词 */
+    /** 搜歌里点的那首：1 放上了、2 没放成 */
+    void songResult(int r) { lib.songResult(r); wake(); }
+    private volatile Library.Data libData;
     /** 歌单：1 打开、2 关上、3 开 / 关、4 返回（先收搜索键盘再关） */
     void shelf(int r) { shelf.request(r); wake(); }
     /** 歌单里回到正在放的那首 */
@@ -135,8 +172,8 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     // ================= GL 对象 =================
-    G.Prog pAur, pBg, pRib, pWater, pGlass, pHalo, pArt, pLine, pText, pPill, pSeek, pDust, pPart;
-    G.Prog[] pIcons; // 控制条上的图形：GL 一段，Vulkan 四段（见 F_ICONS_A）
+    G.Prog pAur, pBg, pRib, pWater, pGlass, pHalo, pArt, pLine, pText, pPill, pSeek, pDust, pPart, pImg;
+    G.Prog[] pIcons; // 控制条上的图形：GL 一段，Vulkan 五段（见 F_ICONS_A）
     G.Mesh mFull, mUnit, mStrip, mGlass, mHalo, mPill, mDust, mPart;
     final G.Fbo aurFbo = new G.Fbo(false), waterFbo = new G.Fbo(true);
     /** 封面贴图：按 Bitmap 记，只留正在用的几张；GL 环境丢了全部重传 */
@@ -318,6 +355,8 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  float al = ln * (1.0 - circ) + circ;\n"
         + "  o = vec4(col * uK, al * uK);\n"
         + "}";
+    /** 彩色的图（音源图标）：贴图是预乘过透明度的 */
+    private static final String F_IMG = "uniform sampler2D uMap; uniform float uA; in vec2 vUv; out vec4 o; void main() { o = texture(uMap, vec2(vUv.x, 1.0 - vUv.y)) * uA; }";
     private static final String F_TEXT = "uniform sampler2D uMap; uniform float uA, uK; uniform vec3 uInk; in vec2 vUv; out vec4 o;"
         + " void main() { float a = texture(uMap, vec2(vUv.x, 1.0 - vUv.y)).a * uA * uK; o = vec4(uInk * a, a); }";
 
@@ -335,13 +374,16 @@ final class Scene implements GLSurfaceView.Renderer {
         + "}";
 
     // uBx：上一首、下一首离中间多远；uHx：红心在哪（见 pillPlace）；uHeart：x 显示、y 实心（收藏了）、z 按下去的缩放
-    private static final String ICONS_HEAD = "uniform float uW, uH, uPlay, uProg, uK, uDay, uBx, uHx; uniform vec3 uPress, uInk, uAcc, uHeart; uniform sampler2D uTime; in vec2 vUv; out vec4 o;\n"
+    // uMx：播放模式键在哪；uModeP：x 显示、y 第几个图形（uMode 里横排三个：列表循环 / 随机 / 单曲循环）、z 按下去的缩放
+    private static final String ICONS_HEAD = "uniform float uW, uH, uPlay, uProg, uK, uDay, uBx, uHx, uMx; uniform vec3 uPress, uInk, uAcc, uHeart, uModeP; uniform sampler2D uTime; uniform sampler2D uMode; in vec2 vUv; out vec4 o;\n"
         + "float sdRB(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }\n"
         + "float sdHeart(vec2 p) { p.x = abs(p.x); if (p.y + p.x > 1.0) return length(p - vec2(0.25, 0.75)) - 0.35355339;\n"
         + "  vec2 a = p - vec2(0.0, 1.0), b = p - 0.5 * max(p.x + p.y, 0.0); return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y); }\n"
         + "float sdTri(vec2 p, float r) { const float k = 1.7320508; p.x = abs(p.x) - r; p.y = p.y + r / k;\n"
         + "  if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0; p.x -= clamp(p.x, -2.0 * r, 0.0); return -length(p) * sign(p.y); }\n"
-        + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n";
+        + "float fill(float d) { float w = fwidth(d) * 0.75; return 1.0 - smoothstep(-w, w, d); }\n"
+        + "float modeA(vec2 p, float h) { vec2 q = (p - vec2(uMx, 0.0)) / (h * 0.42 * uModeP.z) + 0.5; if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return 0.0;\n"
+        + "  return texture(uMode, vec2((q.x + uModeP.y) / 3.0, 1.0 - q.y)).a * uModeP.x; }\n";
     private static final String F_ICONS = ICONS_HEAD
         + "void main() {\n"
         + "  vec2 p = (vUv - 0.5) * vec2(uW, uH); float h = uH;\n"
@@ -361,12 +403,12 @@ final class Scene implements GLSurfaceView.Renderer {
         + "  vec3 accC = mix(uAcc, uAcc * 0.62, uDay);\n"
         + "  float hs = h * 0.22 * uHeart.z, dH = sdHeart((p - vec2(uHx, -hs * 0.55)) / hs) * hs, hk = uHeart.x;\n"
         + "  float hf = fill(dH) * uHeart.y * hk, hl = fill(abs(dH) - h * 0.016) * (1.0 - uHeart.y) * hk * 0.95;\n"
-        + "  float aInk = inkA * 0.95, aTm = tm.a * 0.62;\n"
+        + "  float aInk = max(inkA, modeA(p, h)) * 0.95, aTm = tm.a * 0.62;\n"
         + "  vec3 col = uInk * (aInk + base + aTm + hl) + accC * (on + hf) * 1.1;\n"
         + "  float al = clamp(aInk + base + aTm + on + hl + hf, 0.0, 1.0);\n"
         + "  o = vec4(col * uK, al * uK);\n"
         + "}";
-    // Vulkan：这台车的驱动编不了上面整段（太大；拆成两段时带取贴图的那段又编错了），拆成四次画：播放暂停和上下首 / 进度圈 / 红心 / 时间
+    // Vulkan：这台车的驱动编不了上面整段（太大；拆成两段时带取贴图的那段又编错了），拆成五次画：播放暂停和上下首 / 进度圈 / 红心 / 时间 / 播放模式
     // （各画各的地方、不重叠，叠出来和一次画一样）
     private static final String F_ICONS_A = ICONS_HEAD
         + "void main() {\n"
@@ -397,6 +439,12 @@ final class Scene implements GLSurfaceView.Renderer {
         + "void main() {\n"
         + "  float aTm = texture(uTime, vec2(vUv.x, 1.0 - vUv.y)).a * 0.62;\n"
         + "  o = vec4(uInk * aTm * uK, aTm * uK);\n"
+        + "}";
+    private static final String F_ICONS_E = ICONS_HEAD
+        + "void main() {\n"
+        + "  vec2 p = (vUv - 0.5) * vec2(uW, uH);\n"
+        + "  float a = modeA(p, uH) * 0.95;\n"
+        + "  o = vec4(uInk * a * uK, a * uK);\n"
         + "}";
     private static final String F_ICONS_C = ICONS_HEAD
         + "void main() {\n"
@@ -458,8 +506,9 @@ final class Scene implements GLSurfaceView.Renderer {
         pArt = new G.Prog(V_UVS, F_ART);
         pLine = new G.Prog(V_LINE, F_LINE);
         pText = new G.Prog(V_UV, F_TEXT);
+        pImg = new G.Prog(V_UV, F_IMG);
         pPill = new G.Prog(V_SOLID, F_PILL);
-        pIcons = G.vk() ? new G.Prog[] { new G.Prog(V_UV, F_ICONS_A), new G.Prog(V_UV, F_ICONS_B), new G.Prog(V_UV, F_ICONS_C), new G.Prog(V_UV, F_ICONS_D) } : new G.Prog[] { new G.Prog(V_UV, F_ICONS) };
+        pIcons = G.vk() ? new G.Prog[] { new G.Prog(V_UV, F_ICONS_A), new G.Prog(V_UV, F_ICONS_B), new G.Prog(V_UV, F_ICONS_C), new G.Prog(V_UV, F_ICONS_D), new G.Prog(V_UV, F_ICONS_E) } : new G.Prog[] { new G.Prog(V_UV, F_ICONS) };
         pSeek = new G.Prog(V_UV, F_SEEK);
         pDust = new G.Prog(V_DUST, F_DUST);
         pPart = new G.Prog(V_PART, F_PART);
@@ -476,7 +525,13 @@ final class Scene implements GLSurfaceView.Renderer {
         for (int k = 0; k < 240; k++) { dd[k * 4] = r.next() - 0.5f; dd[k * 4 + 1] = r.next(); dd[k * 4 + 2] = -r.next() * 700 + 120; dd[k * 4 + 3] = r.next(); }
         mDust = G.points(dd, new int[] { 3, 1 });
         mPart = G.points(partData, new int[] { 3, 3, 3, 3, 3, 3 });
+        kb.initGL();
         shelf.initGL();
+        lib.initGL();
+        setp.initGL();
+        keys.initGL();
+        srcTex.clear();
+        srcIconSeq = -1;
         // 环境丢了：贴图都没了，重新传；歌词按新环境重建
         // （旧编号都作废、不去删：新环境里同样的编号可能已经是刚建的东西）
         covers.clear();
@@ -486,9 +541,11 @@ final class Scene implements GLSurfaceView.Renderer {
         waterFbo.samples = G.samples(); // 画布开着抗锯齿：倒影也一样多重采样
         rain.initGL();
         timeTex = 0;
+        modeTex = 0;
         seekTex = 0;
         mSeekLbl = null;
         seekText = "";
+        marks.clear();
         LY.objs.clear();
         LY.leaving.clear();
         TT.cur = null;
@@ -546,6 +603,9 @@ final class Scene implements GLSurfaceView.Renderer {
         pillPlace(pillX, pillW, pillH);
         seekPlace();
         shelf.layout();
+        lib.layout();
+        setp.layout();
+        keys.layout();
     }
 
     // ================= 极光 =================
@@ -602,6 +662,7 @@ final class Scene implements GLSurfaceView.Renderer {
         return mv;
     }
     final float[] cvPose = new float[7]; // 封面砖这一帧的姿态（x, y, z, rx, ry, rz, 大小）：歌单的 hero 砖从这里飞出去
+    private float libK; // 曲库、设置页开着多少（歌词页、长廊让开）
 
     // ================= 背景封面：最多三张一起混。新来的那张从"现在看到的样子"慢慢淡进来——前一次还没淡完又来一张（歌单里翻得快）也不跳 =================
     private final Spring artMix = new Spring(1, 6, 4.9f, 0.002f); // 最新那张淡进来多少
@@ -657,12 +718,13 @@ final class Scene implements GLSurfaceView.Renderer {
 
     // ================= 封面的动作：开场飞入、按下、暂停缩小、翻面换歌、拖着转 =================
     private final Spring cvPress = new Spring(1, 300, 22), cvPlay = new Spring(1, 110, 12.6f, 0.0005f), cvFlip = new Spring(0, 60, 12.5f, 0.0005f),
-        cvRx = new Spring(0, 150, 16, 0.0005f), cvRy = new Spring(0, 150, 16, 0.0005f), cvDx = new Spring(0, 160, 20, 0.05f), cvFmix = new Spring(0, 40, 12.6f, 0.002f);
+        cvRx = new Spring(0, 150, 16, 0.0005f), cvRy = new Spring(0, 150, 16, 0.0005f), cvDx = new Spring(0, 160, 20, 0.05f), cvFmix = new Spring(0, 40, 12.6f, 0.002f),
+        cvSink = new Spring(0, 55, 11, 0.001f); // 曲库开着封面沉进水里多少：沉下去跟着曲库，浮上来走弹簧（慢慢浮起、冲过一点再停稳）
     private boolean cvNext, coverVisible = true;
 
     private boolean coverTick(float dt, float time) {
         boolean moving = false;
-        for (Spring s : new Spring[] { cvPress, cvPlay, cvFlip, cvRx, cvRy, cvDx }) if (s.step(dt)) moving = true;
+        for (Spring s : new Spring[] { cvPress, cvPlay, cvFlip, cvRx, cvRy, cvDx, cvSink }) if (s.step(dt)) moving = true;
         cvPlay.t = MS.playing || !MS.on ? 1 : 0.86f;
         if (cvFmix.step(dt)) moving = true;
         gFMix = cvFmix.x;
@@ -675,8 +737,10 @@ final class Scene implements GLSurfaceView.Renderer {
         float ryy = ry0 + ry + cvRy.x + cvFlip.x + (float) Math.sin(time * 0.37) * 0.07f;
         float[] cp = cvPose;
         cp[0] = cx + off + cvDx.x; cp[1] = cy + mix(-60, 0, k) + (float) Math.sin(time * 0.6) * 4; cp[2] = z + 70; cp[3] = rx; cp[4] = ryy; cp[5] = (float) Math.sin(time * 0.29) * 0.012f; cp[6] = sc;
-        G.compose(coverM, cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], sc, sc, sc);
-        coverVisible = !full || introT > 0.12f;
+        float sk = cvSink.x;
+        if (sk != 0) { cp[1] -= sk * (cp[1] - water + C * 0.9f); cp[3] += sk * 0.5f; cp[6] *= 1 - 0.25f * sk; } // 曲库开着：沉进水里让开
+        G.compose(coverM, cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6], cp[6], cp[6]);
+        coverVisible = (!full || introT > 0.12f) && sk < 0.98f;
         gDim = mix(0.82f, 1, smooth(0.86f, 1, cvPlay.x));
         gSheen = 0.75f + ryy * 0.9f - rx * 0.6f;
         haloK = full ? smooth(0.5f, 1.2f, introT) : 1;
@@ -698,6 +762,7 @@ final class Scene implements GLSurfaceView.Renderer {
         pal = p;
         playPal = p;
         coverTitle = title;
+        host.palette(rgb(p.accent), rgb(p.deep));
         aurColors(p, "init".equals(mode));
         tintSet(p, "init".equals(mode));
         artSet(b, "init".equals(mode));
@@ -736,7 +801,7 @@ final class Scene implements GLSurfaceView.Renderer {
         lines = songLines();
         lyricsSong(time, true);
         if (!title.equals(t0) || !artist.equals(a0)) titleSong(true);
-        boolean sh = shelf.engaged(); // 歌单开着：歌词藏着，不放换歌的光点
+        boolean sh = shelf.engaged() || pages(); // 歌单、曲库、设置页开着：歌词藏着，不放换歌的光点
         revealAt = stReveal && !sh ? time : -1;
         if (stReveal && !sh && MS.lines.length > 0) { introStart("song"); revealAt = -1; }
         wake();
@@ -893,6 +958,8 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     private void lyricsSong(float time, boolean animate) {
+        marksFree();
+        rulerVis.set(0);
         for (LineObj o : LY.objs.values()) {
             if (animate) { o.fadeFrom = o.uAlpha; o.alpha.set(1); o.leave = time + Math.max(0, o.i - LY.shown + 2) * 0.04f; LY.leaving.add(o); }
             else dropObj(o);
@@ -910,11 +977,16 @@ final class Scene implements GLSurfaceView.Renderer {
         boolean moving = false;
         int n = lines.length;
         if (n == 0 || LY.meta.isEmpty()) { seekSel = -1; return leavingTick(dt, time); }
+        boolean ruler = rulerOn();
+        boolean hold = ruler && time < rulerHoldUntil && Math.abs(MS.pos() - rulerHoldMs) > 1500;
+        if (hold) rulerBase = rulerHoldMs; // 跳过去了、播放位置还没跟上：停在跳到的地方
+        else if (!ruler || !LY.drag && Math.abs(LY.scroll.x) <= 6) rulerBase = MS.pos(); // 没在翻：刻度跟着播放位置
         if (!LY.drag) {
             if (Math.abs(LY.scrollV) > 5) { LY.scroll.set(LY.scroll.x + LY.scrollV * dt); LY.scrollV *= (float) Math.exp(-dt * 3.4); LY.idleAt = time; moving = true; }
             else {
                 LY.scrollV = 0;
                 if (LY.scroll.x != 0 && time - LY.idleAt > 3) LY.scroll.t = 0;
+                else if (ruler && seekSel >= 0) LY.scroll.t = rulerSnap(); // 时间尺：停在最近的刻度上
                 else if (seekSel >= 0 && seekSel < n && LY.shown < n) LY.scroll.t = LY.meta.get(seekSel).c - LY.meta.get(LY.shown).c; // 松手停下来：对着的那句挪到定位线上
             }
         }
@@ -926,6 +998,7 @@ final class Scene implements GLSurfaceView.Renderer {
             if (grab != null) grab.s0 -= d;
         }
         float lo = -LY.meta.get(cur).c - 20, hiv = LY.meta.get(n - 1).c - LY.meta.get(cur).c + 20;
+        if (ruler) { lo = -rulerBase / rulerK() - 20; hiv = (MS.dur - rulerBase) / rulerK() + 20; } // 时间尺：从 0 翻到结尾
         if (LY.scroll.x < lo) { LY.scroll.t = lo; if (!LY.drag) LY.scrollV = 0; }
         else if (LY.scroll.x > hiv) { LY.scroll.t = hiv; if (!LY.drag) LY.scrollV = 0; }
         if (LY.scroll.step(dt)) moving = true;
@@ -936,8 +1009,17 @@ final class Scene implements GLSurfaceView.Renderer {
             LY.shown = cur;
             for (LineObj o : LY.objs.values()) o.at = first ? o.at : time + clamp(o.i - cur + 1, 0, 9) * 0.05f;
         }
-        seekSel = seekPick(browsing, n);
-        if (seekSel >= 0) seekMs = MS.times[seekSel];
+        if (ruler) {
+            rulerMs = clamp(rulerBase + LY.scroll.x * rulerK(), 0, MS.dur);
+            seekSel = browsing && !hold && !shelf.engaged() && !pages() ? 0 : -1;
+            if (seekSel >= 0) seekMs = Math.round(rulerMs / 1000f) * 1000L;
+        } else {
+            seekSel = seekPick(browsing, n);
+            if (seekSel >= 0) seekMs = MS.times[seekSel];
+        }
+        rulerVis.t = ruler && seekSel >= 0 ? 1 : 0;
+        if (rulerVis.step(dt)) moving = true;
+        rulerMarks();
         float lim = R * 1.35f;
         List<Integer> want = new ArrayList<>();
         for (int i = 0; i < n; i++) if (Math.abs(lineTarget(i, LY.shown)) < lim) want.add(i);
@@ -969,7 +1051,7 @@ final class Scene implements GLSurfaceView.Renderer {
             o.uBlur = clamp(o.blur.x + (1 - introK), 0, 1);
             o.bAlpha = o.uAlpha;
             float shK = shelf.lyK(i - LY.shown); // 歌单开着：散成光点流进封面
-            o.uAlpha *= 1 - shK;
+            o.uAlpha *= (1 - shK) * (1 - libK) * (1 - rulerVis.x); // 曲库开着、翻时间尺：淡掉
             o.uBlur = Math.max(o.uBlur, shK);
             o.uAct = o.act.x;
             o.uPulse = pulse;
@@ -986,12 +1068,83 @@ final class Scene implements GLSurfaceView.Renderer {
             if (time >= o.leave) { o.alpha.t = 0; o.blur.t = 1; o.y.t = o.ty - R * 0.9f; }
             o.y.step(dt); o.alpha.step(dt); o.blur.step(dt);
             float th = onWheel(o, o.y.x);
-            o.uAlpha = o.alpha.x * o.fadeFrom * (1 - smooth(fade0, fade1, th)) * (1 - shelf.lyK(o.i - LY.shown));
+            o.uAlpha = o.alpha.x * o.fadeFrom * (1 - smooth(fade0, fade1, th)) * (1 - shelf.lyK(o.i - LY.shown)) * (1 - libK);
             o.uBlur = o.blur.x;
             o.uAct = 0; o.uPulse = 0;
             if (o.alpha.x < 0.01f && time > o.leave + 0.2f) { dropObj(o); LY.leaving.remove(j); } else moving = true;
         }
         return moving;
+    }
+
+    // ================= 时间尺：没有歌词（或者只有一句）、能跳进度时上下翻，滚轮上出现时间刻度（随手指滚），定位线对着的时间点了跳过去 =================
+    // 刻度是绝对时间：开始翻的那一刻记下 rulerBase（当时的播放位置），正中对着 rulerBase + 翻过的距离 × 每像素多少毫秒；松手停在最近的刻度上
+    private static final class Mark { int tex; G.Mesh mesh; float w; }
+    private final Map<Long, Mark> marks = new HashMap<>();
+    private final Spring rulerVis = new Spring(0, 160, 20, 0.002f);
+    private float rulerMs, rulerBase, rulerW; // 正中对着的时间、开始翻时的位置（毫秒）；正中那个刻度的宽（定位线在它两边断开）
+    private long rulerHoldMs; // 点了跳过去：播放位置跟上之前（最多 rulerHoldUntil），刻度和时间停在跳到的地方淡出
+    private float rulerHoldUntil = -1;
+    private final float[] rM = new float[16], rLM = new float[16];
+
+    /** 没有歌词（「多媒体」给的常常是一句"暂无歌词，旋律相伴"，也算没有）、能跳进度 */
+    private boolean rulerOn() { return MS.seek && MS.lines.length <= 1 && lines.length == 1 && pend == null; }
+    private float rulerGap() { return Fpx * 1.5f; } // 两个刻度隔多远（场景像素）
+    private long rulerStep() { return MS.dur > 20 * 60000 ? 60000 : MS.dur > 8 * 60000 ? 30000 : 15000; }
+    private float rulerK() { return rulerStep() / rulerGap(); } // 每像素多少毫秒
+
+    /** 松手停下来：正中挪到最近的刻度上（返回 LY.scroll 的目标） */
+    private float rulerSnap() {
+        long st = rulerStep(), t = Math.round(rulerMs / st) * st;
+        t = Math.max(0, Math.min(t, MS.dur));
+        return (t - rulerBase) / rulerK();
+    }
+
+    /** 看得见的刻度做好贴图，看不见的还掉；翻完淡出了全部还掉 */
+    private void rulerMarks() {
+        if (rulerVis.x <= 0.002f) { marksFree(); rulerW = 0; return; }
+        long st = rulerStep();
+        float span = R * 1.35f * rulerK();
+        long a = Math.max(0, (long) Math.ceil((rulerMs - span) / st)) * st, b = Math.min(MS.dur, (long) (rulerMs + span));
+        Iterator<Map.Entry<Long, Mark>> it = marks.entrySet().iterator();
+        while (it.hasNext()) { Map.Entry<Long, Mark> e = it.next(); if (e.getKey() < a || e.getKey() > b) { freeMark(e.getValue()); it.remove(); } }
+        rulerW = 0;
+        for (long t = a; t <= b; t += st) {
+            Mark m = marks.get(t);
+            if (m == null) {
+                Txt.Label l = Txt.label(fmt(t), Fpx * 0.62f, W, false);
+                m = new Mark();
+                m.tex = G.texture(l.bmp, false);
+                l.bmp.recycle();
+                m.mesh = G.quad(-l.w / 2, -l.h / 2, l.w / 2, l.h / 2);
+                m.w = l.w;
+                marks.put(t, m);
+            }
+            if (Math.abs(t - rulerMs) / rulerK() < rulerGap() * 0.5f) rulerW = m.w;
+        }
+    }
+
+    private static void freeMark(Mark m) { if (m.tex != 0) G.free(m.tex); if (m.mesh != null) m.mesh.free(); }
+
+    private void marksFree() { for (Mark m : marks.values()) freeMark(m); marks.clear(); }
+
+    private void drawRuler(float[] V, float[] Pp) {
+        G.depthTest(false);
+        pText.use();
+        pText.m4("uP", Pp); pText.c3("uInk", ink); pText.f("uK", 1);
+        float k = rulerK(), gp = rulerGap();
+        for (Map.Entry<Long, Mark> e : marks.entrySet()) {
+            Mark m = e.getValue();
+            float a = (e.getKey() - rulerMs) / k, th = clamp(a / R, -1.55f, 1.55f); // 离正中多远：正的在下面（同歌词）
+            float near = 1 - smooth(gp * 0.15f, gp * 0.6f, Math.abs(a));
+            float al = rulerVis.x * (1 - smooth(fade0, fade1, Math.abs(a / R))) * (0.4f + 0.6f * near) * (1 - day * 0.3f);
+            if (al < 0.01f) continue;
+            G.compose(rM, center ? 0 : m.w / 2, -R * (float) Math.sin(th), -R * (1 - (float) Math.cos(th)), th, 0, 0, 1, 1, 1);
+            G.mul(rLM, lygM, rM);
+            mv(V, rLM);
+            pText.m4("uMV", MV); pText.tex("uMap", 0, m.tex); pText.f("uA", al);
+            m.mesh.draw();
+        }
+        G.depthTest(true);
     }
 
     // ================= 歌词定位线：上下翻歌词时滚轮正中出现一条线，右头是对着的那句的时间和播放键，点了从那一句开始放 =================
@@ -1017,7 +1170,7 @@ final class Scene implements GLSurfaceView.Renderer {
 
     /** 翻着歌词时对着正中的是哪一句（最近的那句） */
     private int seekPick(boolean browsing, int n) {
-        if (!browsing || pend != null || shelf.engaged() || !MS.on || MS.times == null || MS.times.length != n) return -1;
+        if (!browsing || pend != null || shelf.engaged() || pages() || !MS.on || MS.times == null || MS.times.length != n) return -1;
         float at = LY.meta.get(LY.shown).c + LY.scroll.x, best = Float.MAX_VALUE;
         int sel = -1;
         for (int i = 0; i < n; i++) { float d = Math.abs(LY.meta.get(i).c - at); if (d < best) { best = d; sel = i; } }
@@ -1057,6 +1210,7 @@ final class Scene implements GLSurfaceView.Renderer {
     private void seekTap() {
         if (seekSel < 0) return;
         host.seek(seekMs);
+        if (rulerVis.x > 0.01f) { rulerBase = rulerHoldMs = seekMs; rulerHoldUntil = clock + 2; LY.scroll.set(0); LY.scrollV = 0; seekSel = -1; } // 时间尺：停在跳到的位置上（正中对着的时间不变）淡出
         LY.idleAt = clock - 2.6f; // 滚轮马上转回正在唱的那句（跳过去换了句时，翻到的位置会接上，不会跳）
     }
 
@@ -1070,7 +1224,7 @@ final class Scene implements GLSurfaceView.Renderer {
         pSeek.m4("uP", Pp); pSeek.m4("uMV", MV);
         // 线只画在对着的那句两边（不从字上划过去）
         LineObj so = seekSel >= 0 ? LY.objs.get(seekSel) : null;
-        float tw = so != null && so.lt != null ? so.lt.wPx : 0, tl = center ? -tw / 2 : 0, gp = tw > 0 ? Fpx * 0.4f : 0;
+        float tw = rulerVis.x > 0.01f ? rulerW : so != null && so.lt != null ? so.lt.wPx : 0, tl = center ? -tw / 2 : 0, gp = tw > 0 ? Fpx * 0.4f : 0;
         pSeek.f2("uSize", x1 - x0, h); pSeek.f2("uLine", seekX0 - cxq, seekX1 - cxq); pSeek.f2("uGap", tl - gp - cxq, tl + tw + gp - cxq); pSeek.f("uBx", seekBx - cxq); pSeek.f("uR", seekR);
         pSeek.f("uPress", seekPress.x); pSeek.f("uK", seekVis.x); pSeek.f("uDay", day);
         pSeek.c3("uInk", ink); pSeek.c3("uAcc", pal.accent);
@@ -1105,8 +1259,8 @@ final class Scene implements GLSurfaceView.Renderer {
     private void titleSong(boolean animate) {
         if (TT.cur != null) { if (animate) TT.old.add(TT.cur); else freeTitle(TT.cur); }
         Title o = new Title();
-        o.t = Txt.label(title, tF, tW, true);
-        o.a = Txt.label(artist, aF, tW, false);
+        o.t = Txt.label(title, tF, tW - tF * ICON, true); // 左边让出音源图标的地方
+        o.a = Txt.label(artist, aF, tW - tF * ICON, false);
         o.tt = G.texture(o.t.bmp, false); o.t.bmp.recycle();
         o.ta = G.texture(o.a.bmp, false); o.a.bmp.recycle();
         o.mt = G.quad(-o.t.w / 2, -o.t.h / 2, o.t.w / 2, o.t.h / 2);
@@ -1139,19 +1293,21 @@ final class Scene implements GLSurfaceView.Renderer {
     }
 
     private void placeTitle(Title o, float k0) {
-        float x = tX + (narrow ? (-W / 2 + W * 0.08f - tX) * shelf.titleK() : 0); // 竖屏开着歌单：封面走了，歌名挪到左边
+        float x = tX + (narrow ? (-W / 2 + W * 0.08f - tX) * shelf.titleK() : 0) + srcVis.x * tF * ICON; // 竖屏开着歌单：封面走了，歌名挪到左边；有音源图标时往右让
         G.compose(o.Mt, x - o.t.pad + o.t.w / 2, tY - o.t.h / 2 + o.y.x, 1, 0, 0, 0, 1, 1, 1);
         G.compose(o.Ma, x - o.a.pad + o.a.w / 2, aY - o.a.h / 2 + o.y.x, 1, 0, 0, 0, 1, 1, 1);
-        o.alpha = o.k.x * k0 * (narrow ? 1 : 1 - shelf.searchK()); // 横屏搜索时砖那一行让到画面上沿，左上角的歌名淡掉
+        o.alpha = o.k.x * k0 * (narrow ? 1 : 1 - shelf.searchK()) * (1 - libK); // 横屏搜索时砖那一行让到画面上沿，左上角的歌名淡掉；曲库开着也淡掉
     }
 
     // ================= 控制条：一块浮在水面上的玻璃 =================
-    private final Spring[] press = { new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18) }; // 上一首、播放、下一首、红心
+    private final Spring[] press = { new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18), new Spring(1, 300, 18) }; // 上一首、播放、下一首、红心、播放模式
+    private final Spring modeVis = new Spring(0, 160, 20, 0.002f);
+    private int modeIdx, modeTex; // 现在画哪个播放模式的图形；三个图形的贴图（modeGlyphs）
     private final Spring play = new Spring(1, 160, 18, 0.002f), rise = new Spring(1, 90, 11, 0.0005f);
     private final Spring heartVis = new Spring(0, 160, 20, 0.002f), heartFill = new Spring(0, 220, 16, 0.002f);
     private float pillBaseY, pillZ, pillBv, pillK;
     float pillLw = 1, pillLh = 1, pillF = 1, iconsZ, pillVis; // pillVis：控制条这块玻璃显示多少（开场浮上来）
-    private float pillBx, pillHx, pillFontK = 1; // 上一首、下一首离中间多远，红心在哪，时间字缩到几成（见 pillPlace）
+    private float pillBx, pillHx, pillMx, pillFontK = 1; // 上一首、下一首离中间多远，红心在哪，播放模式键在哪，时间字缩到几成（见 pillPlace）
     private String pillKey = "", timeText = "";
     private long timeKey = -1;
     final float[] pillM = new float[16], iconsM = new float[16];
@@ -1196,9 +1352,10 @@ final class Scene implements GLSurfaceView.Renderer {
         pillBx = Math.min(lw * 0.19f, Math.max(lh * 0.58f, -(hMin + hw + g + pw)));
         pillHx = Math.min((hMin - pillBx - pw - g - hw) / 2, -pillBx - pw - g - hw);
         pillHx = Math.max(pillHx, hMin);
+        pillMx = -pillHx; // 播放模式键在右边，和红心对称
     }
 
-    /** 手指点在哪个键上：0 上一首 / 1 播放暂停 / 2 下一首 / 3 红心 / -1 没点到控制条（cx、cy 是画面上的位置） */
+    /** 手指点在哪个键上：0 上一首 / 1 播放暂停 / 2 下一首 / 3 红心 / 4 播放模式 / -1 没点到控制条（cx、cy 是画面上的位置） */
     private int pillHit(float cxp, float cyp) {
         float[] PS = new float[16], out = new float[3];
         G.mul(PS, P, S);
@@ -1206,8 +1363,9 @@ final class Scene implements GLSurfaceView.Renderer {
         G.mul(PM, PS, pillM);
         int best = -1;
         float bd = 1e9f;
-        float[] xs = { -pillBx, 0, pillBx, pillHx };
-        for (int k = 0; k < (MS.heart != BydMedia.HIDE ? 4 : 3); k++) {
+        float[] xs = { -pillBx, 0, pillBx, pillHx, pillMx };
+        for (int k = 0; k < 5; k++) {
+            if (k == 3 && MS.heart == BydMedia.HIDE || k == 4 && MS.mode < 0) continue;
             G.project(out, PM, xs[k], 0, iconsZ);
             float dx = (out[0] * 0.5f + 0.5f) * W - cxp, dy = (0.5f - out[1] * 0.5f) * H - cyp, dd = dx * dx + dy * dy;
             if (dd < bd) { bd = dd; best = k; }
@@ -1229,9 +1387,13 @@ final class Scene implements GLSurfaceView.Renderer {
         if (hs != BydMedia.HIDE) heartFill.t = hs == BydMedia.ON ? 1 : 0; // 藏起来的时候保持原样淡出
         if (heartVis.step(dt)) moving = true;
         if (heartFill.step(dt)) moving = true;
+        modeVis.t = MS.mode >= 0 ? 1 : 0;
+        if (MS.mode >= 0) modeIdx = MS.mode; // 藏起来的时候保持原样淡出
+        if (modeVis.step(dt)) moving = true;
+        if (modeTex == 0) modeTex = G.texture(modeGlyphs(), false);
         rise.t = k0 > 0.02f ? 1 : 0;
         if (rise.step(dt)) moving = true;
-        float y = pillBaseY - (1 - rise.x) * pillLh * 1.9f - shelf.searchK() * pillLh * 2.2f; // 歌单里搜索时沉下去（键盘在那儿）
+        float y = pillBaseY - (1 - rise.x) * pillLh * 1.9f - Math.max(shelf.searchK(), cvSink.x) * pillLh * 2.2f; // 歌单里搜索时、曲库开着时沉下去（跟着封面）
         // 位置抵掉场景整体的微微摆动（S 的转动）：控制条离镜头近，不抵的话左右晃得多，窄窗口里会晃出画面、点的时候也会挪；朝向照样跟着场景转
         float ca = (float) Math.cos(sRx), sa = (float) Math.sin(sRx), cb = (float) Math.cos(sRy), sb = (float) Math.sin(sRy);
         float y1 = y * ca + pillZ * sa, z1 = -y * sa + pillZ * ca;
@@ -1254,7 +1416,55 @@ final class Scene implements GLSurfaceView.Renderer {
         return moving;
     }
 
+    private static int rgb(float[] c) { return android.graphics.Color.rgb(Math.round(clamp(c[0], 0, 1) * 255), Math.round(clamp(c[1], 0, 1) * 255), Math.round(clamp(c[2], 0, 1) * 255)); }
+
     private static String fmt(long ms) { long s = ms / 1000; return (s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60); }
+
+    /** 播放模式的三个图形横排在一张图里（每格 S×S）：列表循环、随机、单曲循环（循环里加个 1） */
+    private static Bitmap modeGlyphs() {
+        final int S = 96;
+        Bitmap b = Bitmap.createBitmap(S * 3, S, Bitmap.Config.ALPHA_8);
+        android.graphics.Canvas c = new android.graphics.Canvas(b);
+        android.graphics.Paint ln = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        ln.setStyle(android.graphics.Paint.Style.STROKE);
+        ln.setStrokeWidth(S * 0.075f);
+        ln.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+        ln.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        android.graphics.Paint fl = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        for (int g = 0; g < 3; g++) {
+            c.save();
+            c.translate(g * S, 0);
+            c.scale(S, S);
+            ln.setStrokeWidth(0.075f);
+            android.graphics.Path p = new android.graphics.Path();
+            if (g == 1) { // 随机：两条交叉的弧线，右头带箭头
+                p.moveTo(0.14f, 0.32f); p.cubicTo(0.44f, 0.32f, 0.52f, 0.68f, 0.78f, 0.68f);
+                p.moveTo(0.14f, 0.68f); p.cubicTo(0.44f, 0.68f, 0.52f, 0.32f, 0.78f, 0.32f);
+                c.drawPath(p, ln);
+                arrow(c, fl, 0.88f, 0.32f, 1); arrow(c, fl, 0.88f, 0.68f, 1);
+            } else { // 列表循环 / 单曲循环：上面一道往右、下面一道往左，绕成一圈
+                p.moveTo(0.2f, 0.56f); p.lineTo(0.2f, 0.42f); p.quadTo(0.2f, 0.3f, 0.32f, 0.3f); p.lineTo(0.74f, 0.3f);
+                p.moveTo(0.8f, 0.44f); p.lineTo(0.8f, 0.58f); p.quadTo(0.8f, 0.7f, 0.68f, 0.7f); p.lineTo(0.26f, 0.7f);
+                c.drawPath(p, ln);
+                arrow(c, fl, 0.84f, 0.3f, 1); arrow(c, fl, 0.16f, 0.7f, -1);
+                if (g == 2) {
+                    fl.setTextAlign(android.graphics.Paint.Align.CENTER);
+                    fl.setTextSize(0.3f);
+                    fl.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                    c.drawText("1", 0.5f, 0.6f, fl);
+                }
+            }
+            c.restore();
+        }
+        return b;
+    }
+
+    /** 实心小箭头：尖在 (x, y)，dir 1 朝右、-1 朝左（单位格里的坐标） */
+    private static void arrow(android.graphics.Canvas c, android.graphics.Paint fl, float x, float y, int dir) {
+        android.graphics.Path a = new android.graphics.Path();
+        a.moveTo(x, y); a.lineTo(x - dir * 0.15f, y - 0.1f); a.lineTo(x - dir * 0.15f, y + 0.1f); a.close();
+        c.drawPath(a, fl);
+    }
 
     // ================= 光点：从封面流出，划着弧线聚成歌词（开场、换歌都用） =================
     private static final int PN = 2200;
@@ -1422,7 +1632,7 @@ final class Scene implements GLSurfaceView.Renderer {
     // ================= 手势（同网页版） =================
     private final Spring tiltX = new Spring(0, 90, 15, 0.0002f), tiltY = new Spring(0, 90, 15, 0.0002f);
 
-    private static final class Grab { float x, y, lx, ly, vx, vy, s0, ty0; long t, lt; String mode = ""; boolean cover, seek; int key; }
+    private static final class Grab { float x, y, lx, ly, vx, vy, s0, ty0; long t, lt; String mode = ""; boolean cover, seek, src; int key; }
 
     /** 歌单开着时的一次按下：0 别处（左右拖转整个场景）、1 封面那一行、刻度条、键盘（交给歌单） */
     private static final class ShelfGrab { float x, y; long t; int mode; boolean moved; }
@@ -1436,13 +1646,21 @@ final class Scene implements GLSurfaceView.Renderer {
     /** 手势（GL 线程里）：a 0 按下 / 1 移动 / 2 抬起 / 3 取消；nx、ny 是在画布上的比例（0～1）——画布不一定按密度缩（嵌在多窗口里时系统不缩），按比例换算最稳 */
     void touch(int a, float nx, float ny, long tms) {
         float ex = nx * W, ey = ny * H;
+        if (keys.touch(a, ex, ey)) return; // 按在右上角的键上
         float lx = ex - W / 2, ly = H / 2 - ey, fx = ex / W, fy = ey / H;
+        if (lib.engaged() || setp.engaged()) { // 曲库、设置页开着（或者在开 / 关的路上）：全归它
+            if (grab != null) { grab = null; LY.drag = false; cvPress.t = 1; }
+            sg = null;
+            if (setp.engaged()) setp.touch(a, ex, ey, tms); else lib.touch(a, ex, ey, tms);
+            wake();
+            return;
+        }
         if (shelf.engaged()) { // 歌单开着（或者在开 / 关的路上）：按在封面那一行、刻度条、键盘上交给歌单，别处左右拖转整个场景（松手弹回）
             if (grab != null) { grab = null; LY.drag = false; cvPress.t = 1; }
             if (a == 0) {
                 sg = new ShelfGrab();
                 sg.x = ex; sg.y = ey; sg.t = tms;
-                sg.mode = shelf.claims(ex, ey) ? 1 : 0;
+                sg.mode = shelf.claims(ex, ey) ? 1 : onSrcIcon(lx, ly) ? 2 : 0; // 2：按在歌名旁的音源图标上
             }
             ShelfGrab q = sg;
             if (q == null) return;
@@ -1453,6 +1671,7 @@ final class Scene implements GLSurfaceView.Renderer {
                 if (q.moved && q.mode == 0) tiltY.t = clamp(dx / W * 0.9f, -0.38f, 0.38f);
             } else if (a >= 2) {
                 tiltY.t = 0;
+                if (a == 2 && q.mode == 2 && !q.moved) lib.request(2); // 点音源图标：打开曲库
             }
             if (a >= 2) sg = null;
             wake();
@@ -1463,7 +1682,8 @@ final class Scene implements GLSurfaceView.Renderer {
             Grab g = new Grab();
             g.x = ex; g.y = ey; g.t = g.lt = tms; g.lx = ex; g.ly = ey;
             g.seek = seekHit(ex, ey);
-            g.cover = !g.seek && onCover(lx, ly);
+            g.src = !g.seek && onSrcIcon(lx, ly);
+            g.cover = !g.seek && !g.src && onCover(lx, ly);
             g.key = g.seek ? -1 : pillHit(ex, ey);
             g.s0 = LY.scroll.x;
             g.ty0 = (fx - 0.5f) * 0.12f;
@@ -1497,7 +1717,8 @@ final class Scene implements GLSurfaceView.Renderer {
         if (g.mode.isEmpty() && !cancel && tms - g.t < 500) {
             // 点播放键才暂停 / 播放；点封面打开歌单（没有歌单时暂停 / 播放）；别处点一下不管（免得误触）
             if (g.seek) seekTap();
-            else if (g.key == 0) host.press("previous"); else if (g.key == 2) host.press("next"); else if (g.key == 3) host.press("heart");
+            else if (g.src) lib.request(1); // 点歌名旁的音源图标：打开曲库
+            else if (g.key == 0) host.press("previous"); else if (g.key == 2) host.press("next"); else if (g.key == 3) host.press("heart"); else if (g.key == 4) host.press("mode");
             else if (g.key == 1) host.press("toggle");
             else if (g.cover) { cvPress.v -= 1.5f; if (hasSongs) shelf.request(1); else host.press("toggle"); }
         } else if ("v".equals(g.mode) && g.cover) cvRx.t = 0;
@@ -1540,10 +1761,19 @@ final class Scene implements GLSurfaceView.Renderer {
     private float resDown(float k) { float lo = resFloor(); for (float s : STEPS) if (s < k - 0.01f) { s = Math.max(s, lo); return s < k - 0.01f ? s : k; } return k; }
     private float resUp(float k) { float r = k; for (float s : STEPS) if (s > k + 0.01f) r = s; return r; }
     /** 不能再缩了（帧率"自动"这时才降到 30） */
-    private boolean resLow() { float k = view.res(); return resDown(k) >= k || resCpu; }
+    private boolean resLow() { float k = view.res(); return Res.sharp || resDown(k) >= k || resCpu; }
+    private boolean resSharp;
 
     private void resTick(long t, boolean count) {
         String key = Math.round(view.cssW()) + "x" + Math.round(view.cssH());
+        boolean sh = Res.sharp;
+        if (sh != resSharp) { // 设置里换了清晰度：清晰优先回到原尺寸，换回自动用记住的倍数接着调
+            resSharp = sh;
+            resN = 0; resTrial = false; resGap = 30000; resAt = t;
+            float to = sh ? 1 : Res.recall(view.view().getContext(), key);
+            if (Math.abs(to - view.res()) > 0.005f) view.setRes(to);
+        }
+        if (sh) return;
         if (!key.equals(resKey)) { resKey = key; resTrial = resCpu = false; resGap = 30000; resAt = t; }
         if (!count || t < resHold) { resN = 0; if (t < resHold) resSlow = 0; return; }
         if (resN++ == 0) { resT0 = t; resC0 = SystemClock.currentThreadTimeMillis(); return; }
@@ -1624,6 +1854,12 @@ final class Scene implements GLSurfaceView.Renderer {
 
         syncMedia(clock);
         if (shelf.tickP(dt)) moving0 = true;
+        if (lib.tickQ(dt)) moving0 = true;
+        if (setp.tickQ(dt)) moving0 = true;
+        libK = Math.max(lib.coverK(), setp.coverK());
+        if (lib.opening() || setp.opening()) cvSink.set(Math.max(libK, cvSink.x)); else cvSink.t = libK > 0.999f ? 1 : 0; // 关的时候等歌词页开始回来再浮上来
+        shelf.hideK = Math.max(0, cvSink.x); // 长廊跟封面一起：沉下去跟着曲库，浮上来走弹簧
+        shelf.sinkK = cvSink.x;
         long ms = MS.pos();
         int[] st = lyricState();
         boolean moving = moving0, full = introFull();
@@ -1656,11 +1892,16 @@ final class Scene implements GLSurfaceView.Renderer {
         // 封面贴图（只留正在用的）
         texFront = tex(bFront); texFront2 = tex(bFront2 != null ? bFront2 : bFront); texBack = tex(bBack);
         for (int i = 0; i < 3; i++) texArt[i] = tex(artL[i < artN ? i : 0]);
+        if (kb.tick(dt)) moving = true; // 键盘（歌单、曲库按它让位，先走）
         if (shelf.tick(dt, clock)) moving = true; // 歌单的砖（用到上面的封面贴图）
+        if (lib.tick(dt, clock)) moving = true; // 曲库
+        if (setp.tick(dt, clock)) moving = true; // 设置页
+        if (keys.tick(dt)) moving = true; // 右上角的键
+        if (srcTick(dt)) moving = true; // 歌名旁的音源图标
         gcCovers();
 
         if (rainToggle) { rainToggle = false; rain.toggle(stRain, clock); }
-        boolean rainMv = rain.tick(dt, clock), busy = MS.playing || moving || grab != null || shelf.touching();
+        boolean rainMv = rain.tick(dt, clock), busy = MS.playing || moving || grab != null || shelf.touching() || lib.touching() || setp.touching();
         rainOnly = rain.on() && !busy; // 只有水珠在动：30 帧就够
         boolean still = rain.on() && !busy && !sceneDirty && rain.valid(); // 只有水珠在动：不重画场景，用拷下来的画面合成
         sceneDirty = false;
@@ -1796,6 +2037,8 @@ final class Scene implements GLSurfaceView.Renderer {
             mPill.draw();
         }
         shelf.drawSolid(V, Pp); // 歌单的砖
+        lib.drawSolid(V, Pp); // 曲库的砖、音源
+        setp.drawSolid(V, Pp); // 设置页的砖
         // 半透明的：按网页版的先后（背景封面、光带、水面、影子、浮尘、歌词、歌名、控制条的图形、光点）
         G.depthMask(false);
         blendPremul(true);
@@ -1846,6 +2089,8 @@ final class Scene implements GLSurfaceView.Renderer {
             mHalo.draw();
         }
         if (!refl) shelf.drawUnder(V, Pp); // 水面上的光、中间那块的影子
+        if (!refl) lib.drawUnder(V, Pp);
+        if (!refl) setp.drawUnder(V, Pp);
         if (!refl && dustK > 0) {
             pDust.use();
             mvS(V);
@@ -1855,6 +2100,7 @@ final class Scene implements GLSurfaceView.Renderer {
         }
         // 歌词定位线（在歌词后面，不照进水里）、歌词
         if (!refl && seekVis.x > 0.002f) drawSeek(V, Pp);
+        if (!refl && rulerVis.x > 0.002f) drawRuler(V, Pp);
         pLine.use();
         pLine.m4("uP", Pp);
         pLine.f("uDay", day); pLine.c3("uInk", ink); pLine.c3("uHi", hi); pLine.c3("uTint", day > 0.5f ? pal.deep : pal.accent); pLine.f("uLift", Fpx * 0.09f);
@@ -1868,9 +2114,12 @@ final class Scene implements GLSurfaceView.Renderer {
             pText.m4("uP", Pp); pText.c3("uInk", ink);
             if (TT.cur != null) drawTitle(TT.cur, V);
             for (Title o : TT.old) drawTitle(o, V);
+            drawSrcIcon(V, Pp);
             G.depthTest(true);
         }
         shelf.drawText(V, Pp); // 歌单：中间那首的歌名、刻度条上的线和点
+        lib.drawText(V, Pp); // 曲库：每排的标题、音源图标
+        setp.drawText(V, Pp); // 设置页：标题、说明、索引
         // 控制条上的图形、进度圈、时间
         if (rise.x > 0.001f && pillK > 0.002f && timeTex != 0) {
             mv(V, iconsM);
@@ -1879,6 +2128,7 @@ final class Scene implements GLSurfaceView.Renderer {
                 pi.m4("uP", Pp); pi.m4("uMV", MV);
                 pi.f("uW", pillLw); pi.f("uH", pillLh); pi.f("uPlay", play.x); pi.f("uProg", dur > 0 ? clamp(MS.pos() / (float) dur, 0, 1) : 0);
                 pi.f3("uPress", press[0].x, press[1].x, press[2].x); pi.f3("uHeart", heartVis.x, heartFill.x, press[3].x); pi.f("uBx", pillBx); pi.f("uHx", pillHx); pi.c3("uInk", ink); pi.c3("uAcc", pal.accent); pi.tex("uTime", 0, timeTex);
+                pi.f("uMx", pillMx); pi.f3("uModeP", modeVis.x, modeIdx, press[4].x); pi.tex("uMode", 1, modeTex);
                 pi.f("uK", pillK); pi.f("uDay", day);
                 mUnit.draw();
             }
@@ -1894,7 +2144,8 @@ final class Scene implements GLSurfaceView.Renderer {
             pPart.f("uRel", shP ? 1 : 0); if (shP) pPart.m4("uHero", shelf.heroM);
             mPart.draw();
         }
-        if (!refl) shelf.drawPad(Pp); // 歌单的搜索键盘：最上面
+        if (!refl) { keys.drawSolid(V, Pp); keys.drawText(V, Pp); } // 右上角的键（不照进水里）
+        if (!refl) kb.draw(Pp); // 键盘：最上面
         blendPremul(false);
         G.depthMask(true);
     }
@@ -1917,5 +2168,52 @@ final class Scene implements GLSurfaceView.Renderer {
         mv(V, o.Ma);
         pText.m4("uMV", MV); pText.tex("uMap", 0, o.ta); pText.f("uK", 0.6f);
         o.ma.draw();
+    }
+
+    // ================= 歌名左边的音源图标（「多媒体」现在的音源：QQ音乐、蓝牙……；点了打开曲库） =================
+    private static final float ICON = 1.4f; // 图标连同空隙占几个歌名字号
+    private final Spring srcVis = new Spring(0, 110, 20, 0.002f);
+    private final android.util.SparseIntArray srcTex = new android.util.SparseIntArray();
+    private int srcIconSeq = -1, srcShown = -1;
+    private final float[] srcM = new float[16];
+    private float srcX, srcY, srcS;
+
+    private boolean srcTick(float dt) {
+        Library.Data d = libData;
+        if (d != null && d.iconSeq != srcIconSeq) { // 图标换了：重传
+            srcIconSeq = d.iconSeq;
+            for (int i = 0; i < srcTex.size(); i++) G.free(srcTex.valueAt(i));
+            srcTex.clear();
+        }
+        int s = MS.src;
+        Bitmap b = d == null || s < 0 ? null : d.icons.get(s);
+        if (b != null && !b.isRecycled() && srcTex.get(s, 0) == 0) srcTex.put(s, G.texture(b, true));
+        boolean has = srcTex.get(s, 0) != 0;
+        if (has) srcShown = s;
+        srcVis.t = has && MS.on ? 1 : 0;
+        boolean moving = srcVis.step(dt);
+        srcS = tF * 1.05f;
+        Title o = TT.cur;
+        float x = tX + (narrow ? (-W / 2 + W * 0.08f - tX) * shelf.titleK() : 0);
+        srcX = x + srcS / 2;
+        srcY = o != null ? tY - o.t.h / 2 + o.y.x : tY - tF * 0.6f;
+        G.compose(srcM, srcX, srcY, 1, 0, 0, 0, srcS, srcS, 1);
+        return moving;
+    }
+
+    private void drawSrcIcon(float[] V, float[] Pp) {
+        Title o = TT.cur;
+        int tx = srcTex.get(srcShown, 0);
+        float a = srcVis.x * (o != null ? o.alpha : 0);
+        if (tx == 0 || a <= 0.002f) return;
+        pImg.use();
+        mv(V, srcM);
+        pImg.m4("uP", Pp); pImg.m4("uMV", MV); pImg.tex("uMap", 0, tx); pImg.f("uA", a);
+        mUnit.draw();
+        pText.use(); // 后面接着画字
+    }
+
+    private boolean onSrcIcon(float lx, float ly) {
+        return srcVis.x > 0.5f && Math.abs(lx - srcX) < srcS * 0.9f && Math.abs(ly - srcY) < srcS * 0.9f;
     }
 }

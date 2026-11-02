@@ -56,6 +56,7 @@ final class MediaState {
     String lastCmd = "", trackCmd = ""; // trackCmd：换歌前最后按的是什么（封面往哪边翻）
     String pkg; // 宿主说的播放器包名
     int heart = BydMedia.HIDE; // 红心（BydMedia.heart）
+    int mode = -1, src = -1; // 播放模式（BydMedia.mode）、「多媒体」的音源（BydMedia.source；-1：不知道）
 
     private final Uiplus host;
     private final Handler main = new Handler(Looper.getMainLooper()), io;
@@ -103,6 +104,22 @@ final class MediaState {
     private static String clean(String s) { return s == null ? "" : s.replaceAll("\\s+", " ").trim(); }
     private static String str(JSONObject d, String k) { return d == null || d.isNull(k) ? null : d.optString(k, null); }
     private void emit() { listener.changed(); }
+
+    /**
+     * 车机媒体控制器推来的播放位置（「多媒体」在放时每 0.5 秒，见 BydMedia）：和自己记的差 1.5 秒以上就按它校正。
+     * 宿主给的 positionMs 可能是空的（曲目和播放状态对不上时）、过时的，重新打开时进度就从头数；没歌词的歌又没有换句来校准。
+     * 蓝牙不用（它报的位置常常是 0）；歌名对不上（换歌的路上）不用；刚跳过 4 秒内只认和跳到的位置对得上的
+     */
+    void ctlPos(long p, long at, float speed, boolean onNow, String ctlTitle) {
+        if (media == null || !on || !Player.PKG.equals(pkg) || lyKey != null || src == 4 || ctlTitle == null || !ctlTitle.equals(title)) return;
+        long real = p + (onNow ? (long) ((now() - at) * speed) : 0);
+        if (dur > 0) real = Math.min(real, dur);
+        long mine = pos();
+        if (justSeeked() && Math.abs(real - mine) > 4000) return;
+        if (posSet && Math.abs(real - mine) < 1500) return;
+        anchor(Math.max(0, real));
+        emit();
+    }
 
     /** 换会话（重连）时：订阅推来的第一条当初始快照 */
     void reset() {
@@ -590,10 +607,11 @@ final class MediaState {
     /** 交给绘制线程的一份（不会再变）：主线程每次变了就做一份新的 */
     static final class Snap {
         boolean on, playing, full, rawPlaying, canPlay;
+        boolean seek; // 能跳进度：「多媒体」在放、不是蓝牙（AVRCP 跳不了）、不是电台，有时长（没歌词时的时间尺用）
         String track, title = "", artist = "", trackCmd = "";
         String[] lines = new String[0];
         long[] times;
-        int cur = -1, revTrack, revLines, revCover, revCur, heart = BydMedia.HIDE;
+        int cur = -1, revTrack, revLines, revCover, revCur, heart = BydMedia.HIDE, mode = -1, src = -1;
         long dur, posBase, posAt;
         Bitmap cover;
         String coverTrack;
@@ -606,10 +624,10 @@ final class MediaState {
 
         /** 和 o 画出来一样（位置差不到 50 毫秒也算）：场景不用醒 */
         boolean same(Snap o) {
-            return o != null && on == o.on && playing == o.playing && full == o.full && rawPlaying == o.rawPlaying && canPlay == o.canPlay
+            return o != null && on == o.on && playing == o.playing && full == o.full && rawPlaying == o.rawPlaying && canPlay == o.canPlay && seek == o.seek
                 && eq(track, o.track) && title.equals(o.title) && artist.equals(o.artist) && trackCmd.equals(o.trackCmd)
                 && lines == o.lines && times == o.times && cur == o.cur && revTrack == o.revTrack && revLines == o.revLines
-                && revCover == o.revCover && revCur == o.revCur && heart == o.heart && dur == o.dur
+                && revCover == o.revCover && revCur == o.revCur && heart == o.heart && mode == o.mode && src == o.src && dur == o.dur
                 && cover == o.cover && eq(coverTrack, o.coverTrack) && Math.abs(pos() - o.pos()) < 50;
         }
     }
@@ -623,6 +641,9 @@ final class MediaState {
         s.dur = dur; s.posBase = pos(); s.posAt = now();
         s.cover = cover; s.coverTrack = coverTrack;
         s.heart = heart;
+        s.mode = mode;
+        s.src = src;
+        s.seek = on && Player.PKG.equals(pkg) && lyKey == null && dur > 0 && src != 4 && src != 8 && src != 9;
         return s;
     }
 

@@ -25,11 +25,13 @@
 - 在别处左右拖：转着看场景，松手弹回。
 - 右上角是设置和全屏键。全屏键会在主屏上开一个全屏页，再点一下回到原来的小窗口。
 - 歌单里按在封面那一行上左右划着翻（别处左右拖是转场景），点哪块放哪首，点正在放的那块（底下水面亮着光）回到歌词；控制条变成刻度条，拖着直接跳，翻远了点"正在放"回到正在放的那首。
-- 歌单里搜索：点刻度条左头的放大镜，键盘从底下滑上来，打拼音首字母（qlx → 七里香）、全拼或英文，边打边筛，点一首就放。
+- 歌单里搜索：点刻度条左头的放大镜，键盘从底下滑上来，打拼音（全拼或首字母）、英文，边打边筛，点一首就放。
+- 曲库：点歌名左边的音源图标（或者歌单刻度条右头的键）打开。顶上一排切换音源，下面是我喜欢、每日推荐、歌手、风格、语种、心情，点一块换一批歌；「搜歌」能搜在线音乐里的歌，点哪首放哪首。
+- 键盘带中英输入法：打拼音选字（shijiezhongxin → 世界中心），中 / 英键切换。
 
 ## 设置
 
-歌词字体（得意黑 / 系统字体）、深浅色（跟随车机 / 浅色 / 深色）、抗锯齿、渲染方式（Vulkan / OpenGL：Vulkan 更省处理器，画面不对时换成 OpenGL；车机没有 Vulkan 时自动用 OpenGL）、帧率（自动 / 60 帧 / 30 帧）、水面倒影、背景封面、光带、玻璃上的雨珠（自动 / 开 / 关）、开场动画、换歌动画、全屏时收起状态栏。
+歌词字体（得意黑 / 系统字体）、深浅色（跟随车机 / 浅色 / 深色）、抗锯齿、清晰度（显卡跟不上时自动降低 / 一直清晰）、渲染方式（Vulkan / OpenGL：Vulkan 更省处理器，画面不对时换成 OpenGL；车机没有 Vulkan 时自动用 OpenGL）、帧率（自动 / 60 帧 / 30 帧）、水面倒影、背景封面、光带、玻璃上的雨珠（自动 / 开 / 关）、开场动画、换歌动画、全屏时收起状态栏。
 
 ## 在车上用
 
@@ -84,21 +86,24 @@ node build.mjs --install  # 打完用 adb install -r 装上（adb 要在 PATH �
 | `MainActivity.java` | 入口：连宿主、授权、订阅媒体和日夜模式 |
 | `Uiplus.java` | 宿主给外部应用的接口（Binder），文件开头有完整说明 |
 | `MediaState.java` | 媒体快照、整首歌词、播放位置、封面 |
-| `Player.java` | 发给车机「多媒体」的导出入口（零权限）：跳到歌词某一句、收藏、放歌单里的某一首 |
+| `Player.java` | 发给车机「多媒体」的导出入口（零权限）：跳到歌词某一句、收藏、放歌单里的某一首、播放模式、插放、曲库的语音命令 |
 | `BydMedia.java` / `SongCovers.java` | 车机的媒体控制器（零权限）：收藏状态、整个歌单；歌单里的封面 |
-| `Shelf.java` / `SearchPad.java` / `SongIndex.java` | 3D 歌单；歌单里搜索的键盘；按拼音搜歌 |
+| `Shelf.java` / `SongIndex.java` | 3D 歌单；按拼音搜歌 |
+| `Library.java` / `ArtistBook.java` / `ArtistPics.java` / `SongFinder.java` | 3D 曲库；从歌单里攒的歌手；歌手照片；搜歌（各家在线音乐的搜索接口） |
+| `Keyboard.java` / `Pinyin.java` | 全局共用的键盘（中英输入）；拼音输入法（词库不联网） |
 | `Mock.java` | 模拟器里用车上录的假数据（数据不在源码里） |
 | `Scene.java` | 3D 场景、着色器、手势、出帧 |
 | `Rain.java` / `RainPick.java` / `BydWeather.java` | 雨珠、要不要下、读车机天气 |
 | `G.java` / `Txt.java` / `Palette.java` / `Spring.java` | 画图的工具（程序、网格、贴图、离屏缓冲，GL 和 Vulkan 共用一套调用）、歌词贴图和折行、封面取色、弹簧动画 |
 | `Vk.java` / `VkSceneView.java` / `Canvas3D.java` / `Res.java` | Vulkan 后端：把每帧的绘制记下来一次交给原生代码；Vulkan 的画布；两种画布共用的接口；显卡跟不上时画布缩多少（按窗口大小记住） |
-| `Ui.java` / `Settings.java` / `InfoView.java` / `FullActivity.java` | 设置面板、设置存取、连不上宿主或没授权时的说明、全屏页 |
+| `SetPage.java` / `TopKeys.java` / `Ui.java` / `Settings.java` | 3D 设置页；右上角的设置、全屏键；提示条、歌单里的"正在放"；设置存取 |
+| `InfoView.java` / `FullActivity.java` | 连不上宿主或没授权时的说明、全屏页 |
 | `Guide.java` | 新手引导（第一次打开时说明封面能点也能划） |
 
 `jni/lgvk.cpp`：Vulkan 的原生部分（设备、交换链、管线、贴图，每帧录命令、提交、显示）。`vk/shaders.mjs`：打包时把 Java 里的着色器原文转成 Vulkan 的写法、编成 SPIR-V（`assets/vk_*.spv`、`vk.json`）。
 
-`assets/`：歌词字体得意黑（官方 ttf 原样）和它的许可；Vulkan 的着色器。
+`assets/`：歌词字体得意黑（官方 ttf 原样）和它的许可；拼音词库（AOSP 拼音输入法的词库转的格式，Apache-2.0）和它的许可；Vulkan 的着色器。
 
 ## 许可
 
-- 资源的许可：`assets/LICENSE-SmileySans.txt`。
+- 资源的许可：`assets/LICENSE-SmileySans.txt`、`assets/LICENSE-pinyin.txt`。
