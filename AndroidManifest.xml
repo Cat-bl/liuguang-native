@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 琉光（原生版）：车机 Android 10，宿主（com.wzw.bydmodule）的多窗口 / 悬浮窗口把应用嵌进窗口里显示，所以要能随窗口改大小、不重建 -->
+<!-- 琉光（原生版）：车机 Android 10。宿主可以是 BydModule 或 UiSetting，多窗口 / 悬浮窗口把应用嵌进窗口里显示，所以要能随窗口改大小、不重建 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.x3card.liuguang"
     android:versionCode="8"
@@ -11,8 +11,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 蓝牙音乐的封面：手机传过来、车机存在 /storage/emulated/0/bluetooth/ 下的图，要读存储（第一次用到时问车主；安卓 10 读别的应用写的文件要 requestLegacyExternalStorage） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!--
+      显式绑定的两个 UiPlus 服务。Android 11 起包不可见就解析不到，所以两个宿主包都要声明：
+      com.wzw.bydmodule / com.wzw.bydmodule.uiplus.UiplusExternalService
+      com.wzw.uisetting / com.wzw.uisetting.uiplus.external.UiplusExternalService
+    -->
     <queries>
         <package android:name="com.wzw.bydmodule" />
+        <package android:name="com.wzw.uisetting" />
     </queries>
 
     <application
