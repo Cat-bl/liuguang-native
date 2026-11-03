@@ -2,7 +2,7 @@
 
 比亚迪车机上的 3D 歌词应用。放进车机的多窗口（双画中画）或悬浮窗口里，显示正在放的歌：封面、歌名歌手、整首歌词、播放控制和进度。
 
-歌、歌词、封面都来自 4.5UI（宿主应用 BydModule），不用自己去接播放器。画面用 Vulkan 直接画（设置里能换成 OpenGL ES 3.0），不经过浏览器内核，比同样画面的网页卡片省很多处理器。
+歌、歌词、封面都来自 4.5UI 的 UiPlus（宿主优先 BydModule，没有则 UiSetting），不用自己去接播放器。画面用 Vulkan 直接画（设置里能换成 OpenGL ES 3.0），不经过浏览器内核，比同样画面的网页卡片省很多处理器。
 
 ## 画面
 
@@ -35,7 +35,7 @@
 
 ## 在车上用
 
-要有：比亚迪车机（Android 9 以上），装好 4.5UI（宿主应用 BydModule，包名 `com.wzw.bydmodule`）。实车用过的 4.5UI 版本是 2.2.1.6 到 2.2.1.18，更早的版本可能还没有给外部应用的接口。
+要有：比亚迪车机（Android 9 以上），装好一个 UiPlus 宿主。优先 4.5UI（BydModule，包名 `com.wzw.bydmodule`）；没装它时用 UiSetting（包名 `com.wzw.uisetting`）。两个都在时只连 BydModule。实车用过的 4.5UI 版本是 2.2.1.6 到 2.2.1.18，更早的版本可能还没有给外部应用的接口。
 
 1. 把 APK 装到车机上，比如 `adb install -r xxx.apk`。
 2. 在比亚迪「系统加速 → 应用加速管理」里给它打开"允许在后台运行"。不开的话，车机内存紧张时宿主的授权页一盖上来，系统就会把应用结束，授权申请跟着作废。
@@ -47,7 +47,9 @@
 - uiplus Android 接口（这个应用用的）：https://u223v6sxpn.apifox.cn
 - uiplus JS 接口（网页卡片用的）：https://1yquh73bv5.apifox.cn
 
-应用绑定宿主的 `com.wzw.bydmodule/.uiplus.UiplusExternalService`，开会话、申请授权，再按方法名发请求、收订阅推送；方法名和参数同网页卡片的 `window.uiplus`。对接时踩过的坑（授权页、宿主后端晚好、会话超时等）写在 `src/` 里 `Uiplus.java` 的开头。
+应用按顺序绑定宿主服务：先 `com.wzw.bydmodule/.uiplus.UiplusExternalService`，绑不上或没有这个服务再 `com.wzw.uisetting/.uiplus.external.UiplusExternalService`。开会话用的 AIDL 描述符固定是 `com.wzw.bydmodule.uiplus.IUiplusApi` / `IUiplusCallback`（连 UiSetting 时也不改写）。然后申请授权，再按方法名发请求、收订阅推送；方法名和参数同网页卡片的 `window.uiplus`。对接时踩过的坑（授权页、宿主后端晚好、会话超时等）写在 `src/` 里 `Uiplus.java` 的开头。
+
+车上怎么确认连的是哪一个：只装 BydModule 时应连上 BydModule；只装 UiSetting 时应连上 UiSetting；两个都装时仍是 BydModule。连上、还没授权时，说明层上方有一行「已连接 BydModule」或「已连接 UiSetting」。logcat 过滤 `Liuguang` 能看到 `bind BydModule` / `已连上 UiSetting`。
 
 ## 从源码打包
 
@@ -84,7 +86,7 @@ node build.mjs --install  # 打完用 adb install -r 装上（adb 要在 PATH �
 | 文件 | 做什么 |
 |---|---|
 | `MainActivity.java` | 入口：连宿主、授权、订阅媒体和日夜模式 |
-| `Uiplus.java` | 宿主给外部应用的接口（Binder），文件开头有完整说明 |
+| `Uiplus.java` | 宿主给外部应用的接口（Binder）。先绑 BydModule，失败再绑 UiSetting；文件开头有完整说明 |
 | `MediaState.java` | 媒体快照、整首歌词、播放位置、封面 |
 | `Player.java` | 发给车机「多媒体」的导出入口（零权限）：跳到歌词某一句、收藏、放歌单里的某一首、播放模式、插放、曲库的语音命令 |
 | `BydMedia.java` / `SongCovers.java` | 车机的媒体控制器（零权限）：收藏状态、整个歌单；歌单里的封面 |
