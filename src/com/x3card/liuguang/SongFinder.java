@@ -5,10 +5,6 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -61,9 +57,17 @@ final class SongFinder {
             if (seq != latest) return;
             Page p;
             try { p = run(src, query, page, seq); }
+            catch (Busy b) {
+                // QQ 网页接口回 2001（出口 IP 风控）：改用车机 SDK 的 QQ（官方 qplaycloud，不走这个风控）兜底
+                try { p = qqSdk(query, page, seq); }
+                catch (Exception e2) {
+                    Log.w(Uiplus.TAG, "QQ 兜底也失败：" + query + "（" + e2 + "）");
+                    p = new Page(seq, page, src, query, Collections.<Hit>emptyList(), false, "QQ音乐没回结果，过一会儿再搜");
+                }
+            }
             catch (Exception e) {
                 Log.w(Uiplus.TAG, "搜歌失败：" + query + "（" + e + "）");
-                p = new Page(seq, page, src, query, Collections.<Hit>emptyList(), false, e instanceof Busy ? "QQ音乐没回结果，过一会儿再搜" : "搜不了：检查一下网络");
+                p = new Page(seq, page, src, query, Collections.<Hit>emptyList(), false, "搜不了：检查一下网络");
             }
             done.got(p);
         });
@@ -71,6 +75,14 @@ final class SongFinder {
 
     /** QQ 一直回 2001 */
     private static final class Busy extends Exception { Busy() { super("QQ 回 2001"); } }
+
+    /** QQ 兜底：走车机 SDK（MusicSearch 的 QQ），结果转成 Hit。QQ 的 id 两套是同一个数字歌曲 id，insertSong 照样能用 */
+    private static Page qqSdk(String q, int page, int seq) throws Exception {
+        List<Hit> l = new ArrayList<>();
+        for (MusicSearch.Song s : MusicSearch.searchSync(10, q, page))
+            l.add(new Hit(10, s.id, s.name, s.artist, s.album, s.cover));
+        return new Page(seq, page, 10, q, l, l.size() >= PAGE, null);
+    }
 
     private static Page run(int src, String q, int page, int seq) throws Exception {
         String k = URLEncoder.encode(q, "UTF-8");
@@ -183,28 +195,16 @@ final class SongFinder {
     private static String post(String url, String json, String referer) throws Exception { return fetch(url, json, referer); }
 
     private static String fetch(String url, String json, String referer) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        try {
-            c.setConnectTimeout(6000);
-            c.setReadTimeout(8000);
-            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10)");
-            if (referer != null) c.setRequestProperty("Referer", referer);
-            if (json != null) {
-                c.setDoOutput(true);
-                c.setRequestMethod("POST");
-                c.setRequestProperty("Content-Type", "application/json");
-                try (java.io.OutputStream o = c.getOutputStream()) { o.write(json.getBytes("UTF-8")); }
-            }
-            if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
-            ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            try (InputStream in = c.getInputStream()) {
-                byte[] b = new byte[8192];
-                int n;
-                while ((n = in.read(b)) > 0 && bo.size() < 2 * 1024 * 1024) bo.write(b, 0, n);
-            }
-            return bo.toString("UTF-8");
-        } finally {
-            c.disconnect();
+        java.util.Map<String, String> h = new java.util.LinkedHashMap<>();
+        h.put("User-Agent", "Mozilla/5.0 (Linux; Android 10)"); // 网页搜索接口按浏览器 UA 来，盖掉 Http 的默认
+        if (referer != null) h.put("Referer", referer);
+        byte[] body = null;
+        if (json != null) {
+            h.put("Content-Type", "application/json");
+            body = json.getBytes("UTF-8");
         }
+        Http.Resp r = Http.send(json == null ? "GET" : "POST", url, h, body);
+        if (r.code != 200) throw new Exception("HTTP " + r.code);
+        return r.text();
     }
 }
